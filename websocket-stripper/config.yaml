@@ -1,0 +1,33 @@
+name: WebSocket Stripper
+version: "0.1.0"
+slug: websocket_stripper
+description: Serves your real HA dashboards but trims the entity websocket to only what each dashboard uses — fast kiosk loads, full fidelity.
+url: https://github.com/GabrielGoldsteinAnidea/HA-Websocket-Stripper
+arch:
+  - amd64
+  - aarch64
+  - armv7
+init: false
+# SUPERVISOR_TOKEN + core API access (used only to precompute the dashboard allowlists).
+homeassistant_api: true
+hassio_api: true
+ports:
+  "8099/tcp": 8099
+ports_description:
+  "8099/tcp": Browse your trimmed dashboards here (e.g. http://<host>:8099/lovelace-fridge)
+options:
+  dashboards:
+    - fridge-status
+    - home-status
+    - dashboard-deck
+  always_forward: []
+  never_forward: []
+  trim: true
+schema:
+  dashboards:
+    - str
+  always_forward:
+    - str
+  never_forward:
+    - str
+  trim: bool
