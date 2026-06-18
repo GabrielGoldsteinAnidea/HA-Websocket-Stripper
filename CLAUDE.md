@@ -14,12 +14,11 @@ proxy that trims the entity websocket to just the entities each dashboard uses.
 
 ### Why this approach (history — don't re-litigate)
 
-We first tried a lighter path in the sister AppDaemon repo (`Q:\a0d7b954_appdaemon`):
-a long-poll backend (`DashProxy`) + a hand-written **approximated** renderer that redrew
-cards in plain HTML. It loaded fast but the owner wants **pixel-perfect** fidelity, and
-re-implementing Mushroom/button-card/clock-weather/etc. is a losing battle. So we pivoted
-to: **run HA's real frontend, just strip the websocket.** That approximation code is being
-removed from the AppDaemon repo; this repo is the chosen direction.
+We first tried a lighter path: a long-poll backend + a hand-written **approximated**
+renderer that redrew cards in plain HTML. It loaded fast but the owner wants
+**pixel-perfect** fidelity, and re-implementing Mushroom/button-card/clock-weather/etc. is
+a losing battle. So we pivoted to: **run HA's real frontend, just strip the websocket.**
+That approximation approach was abandoned; this repo is the chosen direction.
 
 A pure "reuse only the card-rendering JS" idea isn't viable: HA's core cards live inside
 the compiled frontend bundle and can't be loaded standalone. The realistic way to get the
@@ -80,12 +79,10 @@ HA_TOKEN="<token>" HA_BASE="http://homeassistant.mgmt:8123" \
 
 ## Environment specifics
 
-- HA instance: `http://homeassistant.mgmt:8123` (also `192.168.4.2` = the HA host itself,
-  which also runs the Mosquitto broker and the AppDaemon add-on). The HA host is the only
-  always-on machine, so production = this add-on running on it.
-- The AppDaemon add-on only exposes port 5050 and the owner can't add ports to it / has no
-  container access — which is exactly why this is a **separate add-on with its own port**,
-  not folded into AppDaemon.
+- HA instance: `http://homeassistant.mgmt:8123` (also `192.168.4.2` = the HA host itself).
+  The HA host is the only always-on machine, so production = this add-on running on it.
+- This ships as its **own standalone add-on with its own port** (8099), independent of any
+  other add-on on the host.
 - Target dashboards (storage mode): `fridge-status` (views: fridge-main, weather, audio),
   `home-status` (views: Home, Home Std, Front Door Camera, Kids Cam — note: its Home view
   has malformed `auto-entities` keys like `"domain 1"` from the visual editor),
@@ -101,13 +98,38 @@ HA_TOKEN="<token>" HA_BASE="http://homeassistant.mgmt:8123" \
   *Planned:* subscribe to the `lovelace_updated` event and recompute live.
 - **Registries (entity/device/area) are not trimmed** yet — they pass through full. If
   load is still heavy after entity trimming, trimming/caching these is the next lever.
-- **Reachability:** the add-on must resolve `http://homeassistant:8123`. If it can't on
-  the default add-on network, add `host_network: true` to `config.yaml`.
+- **Reachability:** the add-on must resolve `http://homeassistant:8123`. `host_network: true`
+  is now set (for trusted-network login, below), which can break the internal
+  `homeassistant`/`supervisor` DNS names — the `ha_base` / `allow_ws_url` options pin them
+  to IPs if startup fails (e.g. `ha_base: http://192.168.4.2:8123`).
 - **armv7**: base image is `node:20-alpine` (multi-arch). Verify the build on the target
   arch; drop `armv7` from `config.yaml` `arch` if it doesn't build.
 - **Auth through the proxy:** first load does a normal HA login against the proxy origin.
   If login loops/400s, the HA `http:` integration may need `use_x_forwarded_for` +
   `trusted_proxies` for the add-on's IP.
+- **Trusted-network (password-less) kiosk login — CONFIRMED 2026-06-18:** for HA's
+  `trusted_networks` provider to match the kiosk's real LAN IP, the add-on must run with
+  `host_network: true`. Diagnosed live: with a *mapped* port, Docker rewrites every client
+  to the gateway `172.30.32.1` before the proxy sees it, so `X-Forwarded-For` carries the
+  gateway, not the browser. Proven by injecting XFF through `:8099` — only a hand-fed
+  already-trusted IP produced a trusted login. Fix = `host_network: true` (now in
+  `config.yaml`); HA then sees the proxied request from the **host itself**, so
+  `trusted_proxies` needs `127.0.0.1`/`::1` (+ optionally the host LAN IP) and
+  `trusted_networks` lists the kiosk subnet (kiosk observed on `192.168.5.0/24`). Keep a
+  `type: homeassistant` provider alongside or you lose password login. Alternative without
+  host_network: add `172.30.32.1/32` to `trusted_networks` (trusts ALL proxy traffic —
+  acceptable only for a kiosk on a trusted LAN).
+- **IPv4-mapped IPv6 in X-Forwarded-For — CONFIRMED FIXED 2026-06-18:** even with
+  `host_network` correct and `trusted_proxies` loaded, trusted login still failed because
+  Node reports dual-stack client IPs as IPv4-mapped IPv6 (`::ffff:192.168.5.247`), and HA's
+  `trusted_networks` matches plain IPv4 subnets — a mapped address never matches an IPv4
+  network, so it silently fell through to the password prompt. The proxy now normalizes
+  `X-Forwarded-For` to bare IPv4 in a `proxyReq` handler (strips the `::ffff:` prefix) in
+  `ha_ws_trim_proxy.mjs`. Diagnosed with a temporary `/__whoami` echo endpoint, since
+  add-on logs aren't readable with a long-lived token (Supervisor returns 401). NOTE: a
+  local add-on bakes code into the image at build time (`COPY` in the Dockerfile), so code
+  changes need a **Rebuild**, not a Restart; config.yaml `host_network` also needs Rebuild,
+  and `http:`/`auth_providers` need a full **Core restart** (not a YAML quick-reload).
 
 ## Security
 

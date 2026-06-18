@@ -220,3 +220,8 @@ __marimo__/
 # Node deps (added)
 node_modules/
 **/node_modules/
+
+# Local secrets (HA tokens, etc.) — never commit
+secrets.local.json
+*.local.json
+secrets.local.*

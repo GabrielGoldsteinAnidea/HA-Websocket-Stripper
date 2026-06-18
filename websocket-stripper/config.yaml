@@ -1,6 +1,7 @@
 name: WebSocket Stripper
-version: "0.1.0"
+version: "0.0.1"
 slug: websocket_stripper
+stage: stable
 description: Serves your real HA dashboards but trims the entity websocket to only what each dashboard uses — fast kiosk loads, full fidelity.
 url: https://github.com/GabrielGoldsteinAnidea/HA-Websocket-Stripper
 arch:
@@ -8,6 +9,13 @@ arch:
   - aarch64
   - armv7
 init: false
+# host_network: lets the add-on see the REAL browser IP (not the Docker gateway
+# 172.30.32.1), so HA's trusted_networks auth provider can match the kiosk's LAN IP
+# via X-Forwarded-For. With a mapped port the client IP is rewritten by Docker before
+# the proxy sees it, breaking trusted login. Trade-off: the add-on binds :8099 directly
+# on the host, and the internal `homeassistant`/`supervisor` DNS names may not resolve —
+# use the ha_base / allow_ws_url options below to pin them to IPs if startup fails.
+host_network: true
 # SUPERVISOR_TOKEN + core API access (used only to precompute the dashboard allowlists).
 homeassistant_api: true
 hassio_api: true
@@ -22,7 +30,9 @@ options:
     - dashboard-deck
   always_forward: []
   never_forward: []
-  trim: true
+  strip_entities: true
+  ha_base: ""
+  allow_ws_url: ""
 schema:
   dashboards:
     - str
@@ -30,4 +40,6 @@ schema:
     - str
   never_forward:
     - str
-  trim: bool
+  strip_entities: bool
+  ha_base: "str?"
+  allow_ws_url: "str?"

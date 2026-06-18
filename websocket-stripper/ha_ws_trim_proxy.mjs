@@ -21,7 +21,7 @@
 //
 // Env (dev): HA_TOKEN, HA_BASE (default http://homeassistant.mgmt:8123), PORT (8099),
 //   DASH_PATHS (comma/newline list), ALWAYS_FORWARD, NEVER_FORWARD (literals or /regex/),
-//   TRIM (default 1; 0 = passthrough for A/B compare),
+//   STRIP_ENTITIES (default 1; 0 = passthrough for A/B compare),
 //   ALLOW_WS_URL / ALLOW_TOKEN (override the allowlist-precompute connection).
 
 import http from 'node:http';
@@ -42,14 +42,17 @@ const inAddon = !!process.env.SUPERVISOR_TOKEN;
 const toList = (v) => (Array.isArray(v) ? v : String(v ?? '').split(/[\n,]/))
   .map((s) => String(s).trim()).filter(Boolean);
 
-const HA_BASE = process.env.HA_BASE || (inAddon ? 'http://homeassistant:8123' : 'http://homeassistant.mgmt:8123');
+const HA_BASE = process.env.HA_BASE || OPT.ha_base || (inAddon ? 'http://homeassistant:8123' : 'http://homeassistant.mgmt:8123');
 const HA_WS = HA_BASE.replace(/^http/, 'ws') + '/api/websocket';     // browser ws relay target
 const PORT = parseInt(process.env.PORT || '8099', 10);
 const DASH_PATHS = toList(OPT.dashboards ?? (process.env.DASH_PATHS || process.env.DASH_PATH));
-const TRIM = OPT.trim !== undefined ? !!OPT.trim : process.env.TRIM !== '0';
+// strip_entities: true (default) = inject the allowlist so HA streams only needed entities.
+//   false = pass the websocket straight through (full firehose) for A/B comparison.
+const STRIP = OPT.strip_entities !== undefined ? !!OPT.strip_entities
+  : (process.env.STRIP_ENTITIES ?? process.env.TRIM) !== '0';
 
 // allowlist-precompute connection (add-on: supervisor proxy + SUPERVISOR_TOKEN)
-const ALLOW_WS_URL = process.env.ALLOW_WS_URL || (inAddon ? 'ws://supervisor/core/websocket' : HA_WS);
+const ALLOW_WS_URL = process.env.ALLOW_WS_URL || OPT.allow_ws_url || (inAddon ? 'ws://supervisor/core/websocket' : HA_WS);
 const ALLOW_TOKEN = process.env.ALLOW_TOKEN || process.env.SUPERVISOR_TOKEN || process.env.HA_TOKEN;
 
 // allow/deny overrides — each entry is a literal entity_id or a /regex/ (optional flags).
@@ -126,7 +129,17 @@ function computeAllow() {
 }
 
 // ---- HTTP passthrough to HA ----
-const proxy = httpProxy.createProxyServer({ target: HA_BASE, changeOrigin: true, ws: false, autoRewrite: true });
+// xfwd:true adds X-Forwarded-For/Proto/Host so HA's trusted_networks auth provider
+// sees the real browser IP (needs http.use_x_forwarded_for + trusted_proxies on HA side).
+const proxy = httpProxy.createProxyServer({ target: HA_BASE, changeOrigin: true, ws: false, autoRewrite: true, xfwd: true });
+// Node reports dual-stack client IPs as IPv4-mapped IPv6 (e.g. ::ffff:192.168.5.247).
+// HA's trusted_networks auth provider matches plain IPv4 subnets, and a mapped address
+// won't match an IPv4 network — so normalize X-Forwarded-For to the bare IPv4 here, or
+// trusted-network (password-less) kiosk login silently falls through to a password prompt.
+proxy.on('proxyReq', (proxyReq, req) => {
+  const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  if (ip) proxyReq.setHeader('x-forwarded-for', ip);
+});
 proxy.on('error', (e, req, res) => { log('http proxy error', e.message); try { res.writeHead(502); res.end('proxy error'); } catch {} });
 const server = http.createServer((req, res) => proxy.web(req, res));
 
@@ -148,8 +161,8 @@ function bridge(browserWs) {
   browserWs.on('message', (raw) => {
     let s = raw.toString(); let m;
     try { m = JSON.parse(s); } catch { return toHA(s); }
-    if (TRIM && m && m.type === 'get_states') getStatesIds.add(m.id);
-    if (TRIM && m && m.type === 'subscribe_entities' && !m.entity_ids) {
+    if (STRIP && m && m.type === 'get_states') getStatesIds.add(m.id);
+    if (STRIP && m && m.type === 'subscribe_entities' && !m.entity_ids) {
       m.entity_ids = [...ALLOW];           // HA now streams only the allowlist
       s = JSON.stringify(m);
     }
@@ -159,7 +172,7 @@ function bridge(browserWs) {
   haWs.on('message', (raw) => {
     let s = raw.toString(); let m;
     try { m = JSON.parse(s); } catch { return safeSend(s); }
-    if (TRIM && m && m.type === 'result' && getStatesIds.has(m.id) && Array.isArray(m.result)) {
+    if (STRIP && m && m.type === 'result' && getStatesIds.has(m.id) && Array.isArray(m.result)) {
       const before = m.result.length;
       m.result = m.result.filter((e) => ALLOW.has(e.entity_id));
       getStatesIds.delete(m.id);
@@ -179,7 +192,7 @@ function bridge(browserWs) {
 log(`mode: ${inAddon ? 'add-on' : 'dev'} | target ${HA_BASE} | allowlist via ${ALLOW_WS_URL}`);
 computeAllow().then((set) => {
   ALLOW = set;
-  log(`union allowlist for [${DASH_PATHS.join(', ')}]: ${ALLOW.size} entities (TRIM=${TRIM})`);
+  log(`union allowlist for [${DASH_PATHS.join(', ')}]: ${ALLOW.size} entities (strip_entities=${STRIP})`);
   server.listen(PORT, () => {
     log(`HA trim-proxy listening on :${PORT}  ->  ${HA_BASE}`);
     DASH_PATHS.forEach((p) => log(`  open: http://<host>:${PORT}/${p}`));
