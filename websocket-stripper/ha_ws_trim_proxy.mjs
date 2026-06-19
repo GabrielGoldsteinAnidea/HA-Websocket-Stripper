@@ -153,6 +153,7 @@ server.on('upgrade', (req, socket, head) => {
 function bridge(browserWs) {
   const haWs = new WebSocket(HA_WS, { perMessageDeflate: true, maxPayload: 0 });
   const getStatesIds = new Set();
+  const subEntityIds = new Set();   // subscribe_entities subs we injected the allowlist into
   const queue = []; let haOpen = false;
   const toHA = (s) => { if (haOpen) haWs.send(s); else queue.push(s); };
 
@@ -164,8 +165,10 @@ function bridge(browserWs) {
     if (STRIP && m && m.type === 'get_states') getStatesIds.add(m.id);
     if (STRIP && m && m.type === 'subscribe_entities' && !m.entity_ids) {
       m.entity_ids = [...ALLOW];           // HA now streams only the allowlist
+      subEntityIds.add(m.id);              // remember it, to defensively re-filter its events
       s = JSON.stringify(m);
     }
+    if (m && m.type === 'unsubscribe_events' && m.subscription != null) subEntityIds.delete(m.subscription);
     toHA(s);
   });
 
@@ -178,6 +181,25 @@ function bridge(browserWs) {
       getStatesIds.delete(m.id);
       s = JSON.stringify(m);
       log(`get_states trimmed ${before} -> ${m.result.length}`);
+    }
+    // Defensive egress filter (belt-and-suspenders): HA already trims to the injected
+    // entity_ids, so this is normally a no-op. But if a future HA ever ignored that
+    // filter, re-filter the subscribe_entities event payload to the allowlist here so
+    // the full firehose can never leak to the browser. Compressed format: a=added,
+    // c=changed (both dicts keyed by entity_id), r=removed (list of entity_ids).
+    if (STRIP && m && m.type === 'event' && subEntityIds.has(m.id) && m.event) {
+      const ev = m.event; let changed = false;
+      for (const k of ['a', 'c']) {
+        if (ev[k]) for (const eid of Object.keys(ev[k])) {
+          if (!ALLOW.has(eid)) { delete ev[k][eid]; changed = true; }
+        }
+      }
+      if (Array.isArray(ev.r)) {
+        const before = ev.r.length;
+        ev.r = ev.r.filter((eid) => ALLOW.has(eid));
+        if (ev.r.length !== before) changed = true;
+      }
+      if (changed) s = JSON.stringify(m);
     }
     safeSend(s);
   });
