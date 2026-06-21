@@ -94,8 +94,14 @@ HA_TOKEN="<token>" HA_BASE="http://homeassistant.mgmt:8123" \
 
 - **Frontend JS bundles still load** (cached after first visit). This targets the entity
   firehose, which is what scales with instance size — not first-ever bundle load.
-- **Allowlist is startup-only.** Editing a dashboard's cards needs an add-on restart.
-  *Planned:* subscribe to the `lovelace_updated` event and recompute live.
+- **Allowlist recomputes live on dashboard edits.** A persistent control ws (`startController`
+  in `ha_ws_trim_proxy.mjs`) builds the allowlist at boot, then subscribes to HA's
+  `lovelace_updated` event and rebuilds (debounced 1.5 s) on every dashboard save, with
+  reconnect-on-drop. So editing a dashboard's cards no longer needs an add-on restart — but
+  the recompute only affects **new** ws connections, so an already-open kiosk page must be
+  **reloaded** to pick up newly-added entities (the add-on itself doesn't restart). Adding a
+  whole new dashboard to the `dashboards` option still needs a restart (options are read at
+  boot). If the control ws can't reconnect, the proxy keeps serving the last-known allowlist.
 - **Registries (entity/device/area) are not trimmed** yet — they pass through full. If
   load is still heavy after entity trimming, trimming/caching these is the next lever.
 - **Reachability:** the add-on must resolve `http://homeassistant:8123`. `host_network: true`

@@ -11,8 +11,9 @@
 // Everything else (auth handshake, registries, config, events) passes through, so the
 // real frontend renders your real cards — just without the all-entities firehose.
 //
-// The allowlist is computed once at startup from each dashboard's lovelace/config
-// (walked by ./lovelace_extract.mjs), unioned across all configured dashboards.
+// The allowlist is computed at startup from each dashboard's lovelace/config (walked by
+// ./lovelace_extract.mjs), unioned across all configured dashboards, then rebuilt live
+// whenever HA fires `lovelace_updated` (a dashboard was edited) — no restart needed.
 //
 // Runs in two modes (auto-detected):
 //   * HA add-on  — reads /data/options.json, uses SUPERVISOR_TOKEN via the supervisor
@@ -89,42 +90,93 @@ function allowlistFor(cfg, states) {
   return out;
 }
 
-// ---- compute the union allowlist once (own short-lived HA ws) ----
-function computeAllow() {
+// Build the union allowlist over all configured dashboards using an authed rpc().
+async function buildAllow(rpc) {
+  const states = await rpc({ type: 'get_states' });
+  const realIds = states.map((s) => s.entity_id);
+  const union = new Set();
+  for (const p of DASH_PATHS) {
+    try {
+      const cfg = await rpc({ type: 'lovelace/config', url_path: p });
+      const set = allowlistFor(cfg, states);
+      log(`  ${p}: ${set.size} entities`);
+      set.forEach((e) => union.add(e));
+    } catch (e) { log(`  ${p}: FAILED ${e.message}`); }
+  }
+  const baseN = union.size;
+  ALWAYS.forEach((r) => {
+    if (r.literal) union.add(r.literal);
+    else realIds.forEach((eid) => { if (r.re.test(eid)) union.add(eid); });
+  });
+  const afterAlways = union.size;
+  [...union].forEach((eid) => { if (matchesAny(NEVER, eid)) union.delete(eid); });
+  log(`overrides: base ${baseN}, +always ${afterAlways - baseN}, -never ${afterAlways - union.size}`);
+  return union;
+}
+
+// ---- persistent control connection: compute the allowlist + watch for dashboard edits ----
+// One long-lived HA ws (the supervisor proxy in add-on mode). After auth it builds the
+// allowlist once (resolving boot), then subscribes to `lovelace_updated` and rebuilds on
+// every dashboard save — so card edits take effect without an add-on restart. Reconnects
+// with backoff on drop so live updates keep working for the life of the add-on.
+// Resolves with the first allowlist; rejects only if the very first connect/auth fails.
+function startController() {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(ALLOW_WS_URL); let id = 1; const pending = {};
-    const rpc = (o) => { o.id = id++; return new Promise((res, rej) => { pending[o.id] = [res, rej]; ws.send(JSON.stringify(o)); }); };
-    ws.on('message', async (raw) => {
-      const m = JSON.parse(raw.toString());
-      if (m.type === 'auth_required') return ws.send(JSON.stringify({ type: 'auth', access_token: ALLOW_TOKEN }));
-      if (m.type === 'auth_invalid') return reject(new Error('auth_invalid'));
-      if (m.type === 'auth_ok') {
-        try {
-          const states = await rpc({ type: 'get_states' });
-          const realIds = states.map((s) => s.entity_id);
-          const union = new Set();
-          for (const p of DASH_PATHS) {
-            try {
-              const cfg = await rpc({ type: 'lovelace/config', url_path: p });
-              const set = allowlistFor(cfg, states);
-              log(`  ${p}: ${set.size} entities`);
-              set.forEach((e) => union.add(e));
-            } catch (e) { log(`  ${p}: FAILED ${e.message}`); }
-          }
-          const baseN = union.size;
-          ALWAYS.forEach((r) => {
-            if (r.literal) union.add(r.literal);
-            else realIds.forEach((eid) => { if (r.re.test(eid)) union.add(eid); });
-          });
-          const afterAlways = union.size;
-          [...union].forEach((eid) => { if (matchesAny(NEVER, eid)) union.delete(eid); });
-          log(`overrides: base ${baseN}, +always ${afterAlways - baseN}, -never ${afterAlways - union.size}`);
-          ws.close(); resolve(union);
-        } catch (e) { reject(e); }
-      }
-      if (m.type === 'result' && pending[m.id]) { const p = pending[m.id]; m.success ? p[0](m.result) : p[1](new Error(JSON.stringify(m.error))); delete pending[m.id]; }
-    });
-    ws.on('error', reject);
+    let settled = false;
+    let backoff = 1000;
+    let recomputeTimer = null;
+
+    const connect = () => {
+      const ws = new WebSocket(ALLOW_WS_URL); let id = 1; const pending = {}; let gone = false;
+      const rpc = (o) => { o.id = id++; return new Promise((res, rej) => { pending[o.id] = [res, rej]; ws.send(JSON.stringify(o)); }); };
+
+      // Debounce bursts of edits (the editor can fire several saves) into one rebuild.
+      const scheduleRecompute = (why) => {
+        clearTimeout(recomputeTimer);
+        recomputeTimer = setTimeout(async () => {
+          try { ALLOW = await buildAllow(rpc); log(`allowlist recomputed (${why}): ${ALLOW.size} entities`); }
+          catch (e) { log('recompute failed:', e.message); }
+        }, 1500);
+      };
+
+      ws.on('message', async (raw) => {
+        const m = JSON.parse(raw.toString());
+        if (m.type === 'auth_required') return ws.send(JSON.stringify({ type: 'auth', access_token: ALLOW_TOKEN }));
+        if (m.type === 'auth_invalid') { if (!settled) { settled = true; reject(new Error('auth_invalid')); } try { ws.close(); } catch {} return; }
+        if (m.type === 'auth_ok') {
+          try {
+            backoff = 1000;
+            ALLOW = await buildAllow(rpc);
+            if (!settled) { settled = true; resolve(ALLOW); }
+            else log(`allowlist recomputed (reconnect): ${ALLOW.size} entities`);
+            await rpc({ type: 'subscribe_events', event_type: 'lovelace_updated' });
+            log('watching lovelace_updated for live allowlist updates');
+          } catch (e) { if (!settled) { settled = true; reject(e); } else log('post-auth setup failed:', e.message); }
+          return;
+        }
+        if (m.type === 'event' && m.event?.event_type === 'lovelace_updated') {
+          const p = m.event.data?.url_path ?? '(default)';
+          log(`lovelace_updated: ${p}`);
+          scheduleRecompute(p);
+          return;
+        }
+        if (m.type === 'result' && pending[m.id]) { const p = pending[m.id]; m.success ? p[0](m.result) : p[1](new Error(JSON.stringify(m.error))); delete pending[m.id]; }
+      });
+
+      const onGone = (e) => {
+        if (gone) return; gone = true;
+        if (e) log('control ws error:', e.message);
+        Object.values(pending).forEach(([, rej]) => rej(new Error('control ws closed')));
+        if (!settled) { settled = true; reject(new Error('control ws closed before first allowlist')); return; }
+        log(`control ws down; reconnecting in ${backoff}ms (serving last allowlist: ${ALLOW.size})`);
+        setTimeout(connect, backoff);
+        backoff = Math.min(backoff * 2, 30000);
+      };
+      ws.on('close', () => onGone());
+      ws.on('error', (e) => onGone(e));
+    };
+
+    connect();
   });
 }
 
@@ -190,7 +242,7 @@ function bridge(browserWs) {
 
 // ---- boot ----
 log(`mode: ${inAddon ? 'add-on' : 'dev'} | target ${HA_BASE} | allowlist via ${ALLOW_WS_URL}`);
-computeAllow().then((set) => {
+startController().then((set) => {
   ALLOW = set;
   log(`union allowlist for [${DASH_PATHS.join(', ')}]: ${ALLOW.size} entities (strip_entities=${STRIP})`);
   server.listen(PORT, () => {
