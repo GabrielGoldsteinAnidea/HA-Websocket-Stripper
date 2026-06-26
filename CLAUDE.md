@@ -39,6 +39,12 @@ Everything else (auth handshake, registry calls, config, events) passes through,
 real frontend renders your real cards — just without the all-entities firehose. The
 browser relays its own user token in the ws auth; the proxy doesn't touch auth.
 
+**Only `/api/websocket` is intercepted.** Every *other* websocket upgrade is proxied
+straight through to HA — notably `/api/webrtc/ws` (go2rtc / WebRTC + MSE camera-stream
+signaling) and Assist-pipeline sockets. The original code `socket.destroy()`'d all
+non-`/api/websocket` upgrades, which broke camera streams with ws close code 1006; the
+upgrade handler now forwards them via `proxy.ws()`.
+
 ## Allowlist computation
 
 Union, across all configured dashboards, of:

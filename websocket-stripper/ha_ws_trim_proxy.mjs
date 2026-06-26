@@ -3,8 +3,8 @@
 // but trims the entity firehose so a kiosk dashboard loads fast with full fidelity.
 //
 // It proxies all HTTP straight through to HA (frontend bundles, auth, registries,
-// lovelace config, custom-card resources — untouched), and intercepts ONLY the
-// /api/websocket connection:
+// lovelace config, custom-card resources — untouched). All websocket upgrades also pass
+// through EXCEPT /api/websocket, which is the only connection it intercepts:
 //   * subscribe_entities (no filter)  -> inject entity_ids = the dashboards' allowlist,
 //                                         so HA streams only those entities.
 //   * get_states result               -> filtered to the allowlist.
@@ -192,14 +192,28 @@ proxy.on('proxyReq', (proxyReq, req) => {
   const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
   if (ip) proxyReq.setHeader('x-forwarded-for', ip);
 });
-proxy.on('error', (e, req, res) => { log('http proxy error', e.message); try { res.writeHead(502); res.end('proxy error'); } catch {} });
+// Error arg is an http res for proxy.web() but a raw socket for proxy.ws() — handle both.
+proxy.on('error', (e, req, res) => {
+  log('proxy error', e.message);
+  try {
+    if (res && typeof res.writeHead === 'function') { res.writeHead(502); res.end('proxy error'); }
+    else if (res && typeof res.destroy === 'function') res.destroy();   // ws upgrade socket
+  } catch {}
+});
 const server = http.createServer((req, res) => proxy.web(req, res));
 
-// ---- intercept only the HA websocket ----
+// ---- websocket upgrades ----
+// We intercept ONLY /api/websocket (the entity firehose) to trim it. EVERY other ws
+// upgrade passes straight through to HA — notably /api/webrtc/ws (go2rtc / WebRTC & MSE
+// camera-stream signaling) and Assist-pipeline sockets. Destroying them (the old default
+// branch) broke camera streams with ws close code 1006.
 const wss = new WebSocketServer({ noServer: true });
 server.on('upgrade', (req, socket, head) => {
-  if (!req.url.startsWith('/api/websocket')) { socket.destroy(); return; }
-  wss.handleUpgrade(req, socket, head, (browserWs) => bridge(browserWs));
+  if (req.url.startsWith('/api/websocket')) {
+    wss.handleUpgrade(req, socket, head, (browserWs) => bridge(browserWs));
+  } else {
+    proxy.ws(req, socket, head);
+  }
 });
 
 function bridge(browserWs) {
