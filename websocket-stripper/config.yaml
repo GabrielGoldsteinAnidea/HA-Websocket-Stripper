@@ -1,5 +1,5 @@
 name: WebSocket Stripper
-version: "0.0.4"
+version: "0.1.1"
 slug: websocket_stripper
 stage: stable
 description: Serves your real HA dashboards but trims the entity websocket to only what each dashboard uses — fast kiosk loads, full fidelity.
