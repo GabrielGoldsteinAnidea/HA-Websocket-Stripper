@@ -39,6 +39,10 @@ function loadOptions() {
 }
 const OPT = loadOptions();
 const inAddon = !!process.env.SUPERVISOR_TOKEN;
+// Bump together with config.yaml `version`. Logged at boot so the add-on log shows exactly
+// which code is running — the only reliable way to tell a Rebuild actually picked up changes
+// (a local add-on bakes in whatever files are in the host's /addons folder, not GitHub).
+const VERSION = '0.0.4';
 
 const toList = (v) => (Array.isArray(v) ? v : String(v ?? '').split(/[\n,]/))
   .map((s) => String(s).trim()).filter(Boolean);
@@ -212,6 +216,7 @@ server.on('upgrade', (req, socket, head) => {
   if (req.url.startsWith('/api/websocket')) {
     wss.handleUpgrade(req, socket, head, (browserWs) => bridge(browserWs));
   } else {
+    log(`ws upgrade passthrough -> HA: ${req.url}`);   // e.g. /api/webrtc/ws camera streams
     proxy.ws(req, socket, head);
   }
 });
@@ -255,6 +260,7 @@ function bridge(browserWs) {
 }
 
 // ---- boot ----
+log(`ha-ws-trim-proxy v${VERSION} starting`);
 log(`mode: ${inAddon ? 'add-on' : 'dev'} | target ${HA_BASE} | allowlist via ${ALLOW_WS_URL}`);
 startController().then((set) => {
   ALLOW = set;
