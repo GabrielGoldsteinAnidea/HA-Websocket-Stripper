@@ -110,7 +110,13 @@ keeps working out of the box.
 - Cards referencing entities outside the allowlist will show "unavailable". The allowlist
   is computed generously (all views + template-referenced ids), but if something's
   missing add it via `always_forward`.
-- The allowlist is computed at **startup** — restart the add-on after changing a
-  dashboard's cards.
+- The allowlist is computed at startup and **rebuilt live** when a dashboard is saved (or a
+  registry changes) — no restart needed, but an already-open kiosk page must be reloaded to
+  pick up newly-added entities. Adding a whole new dashboard to `dashboards` still needs a
+  restart, since options are read at boot.
+- **Restarting Home Assistant is safe.** The add-on keeps running and waits: HTTP returns
+  502 and `/api/websocket` is refused while core is down, then it reconnects, rebuilds the
+  allowlist, and open dashboards recover on their own. The same applies at host boot, when
+  the add-on starts before core is listening.
 - Navigating (via the HA sidebar) to a dashboard **not** in `dashboards` will show its
   entities as unavailable; add it to the list if you want it served too.

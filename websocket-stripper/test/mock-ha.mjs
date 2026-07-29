@@ -27,13 +27,19 @@ const DEFAULT_REGISTRIES = {
   'config/label_registry/list': LABELS,
 };
 
-export async function startMockHa({ configs = DEFAULT_CONFIGS, states = STATES, registries = DEFAULT_REGISTRIES } = {}) {
-  const port = await getFreePort();
+// `port` pins the listen port so a test can take HA down and bring it back on the same
+// address — i.e. simulate an HA restart under a running proxy.
+export async function startMockHa({ configs = DEFAULT_CONFIGS, states = STATES, registries = DEFAULT_REGISTRIES, port: fixedPort } = {}) {
+  const port = fixedPort ?? await getFreePort();
+  configs = { ...configs };    // per-mock copy, so a setConfig() in one test can't leak into the next
   const state = {
     lastXFF: null,
     httpHits: [],
     conns: new Set(),          // { ws, eventSubs:Map<event_type,id>, entitySubIds:Set }
     lastSubscribeEntities: null,
+    hangUpgrades: false,       // accept the TCP connection, never answer the upgrade
+    rawUpgrades: new Set(),
+    sockets: new Set(),        // EVERY accepted socket, so close() can't hang (see close())
   };
 
   const server = http.createServer((req, res) => {
@@ -44,8 +50,18 @@ export async function startMockHa({ configs = DEFAULT_CONFIGS, states = STATES, 
     res.end('MOCK_HA_BODY ' + req.url);
   });
 
+  server.on('connection', (s) => { state.sockets.add(s); s.on('close', () => state.sockets.delete(s)); });
+
   const wss = new WebSocketServer({ noServer: true });
   server.on('upgrade', (req, socket, head) => {
+    socket.on('error', () => socket.destroy());
+    if (state.hangUpgrades) {
+      // Hold the upgrade open without answering — keeps the PROXY's client-side socket in
+      // the pre-101 window, which is where an unhandled socket error used to kill it.
+      state.rawUpgrades.add(socket);
+      socket.on('close', () => state.rawUpgrades.delete(socket));
+      return;
+    }
     if (req.url.startsWith('/api/websocket')) {
       wss.handleUpgrade(req, socket, head, (ws) => haProtocol(ws));
     } else {
@@ -74,6 +90,8 @@ export async function startMockHa({ configs = DEFAULT_CONFIGS, states = STATES, 
           if (!cfg) return ws.send(JSON.stringify({ id: m.id, type: 'result', success: false, error: { code: 'not_found', message: m.url_path } }));
           return ok(cfg);
         }
+        case 'lovelace/dashboards/list':
+          return ok(Object.keys(configs).map((url_path) => ({ id: url_path, url_path, title: url_path })));
         case 'subscribe_events':
           conn.eventSubs.set(m.event_type, m.id);
           return ok(null);
@@ -112,8 +130,18 @@ export async function startMockHa({ configs = DEFAULT_CONFIGS, states = STATES, 
     },
     fireLovelaceUpdated(url_path) { this.fireEvent('lovelace_updated', { url_path }); },
     setConfig(url_path, cfg) { configs[url_path] = cfg; },
+    setHangUpgrades(v) { state.hangUpgrades = v; },
+    // Go away the way a real restart does: stop accepting AND drop every open socket, so the
+    // proxy sees resets rather than a graceful shutdown.
+    // Destroy from state.sockets, not just the ws/upgrade bookkeeping: server.close() waits
+    // for EVERY accepted connection, including ones no other set tracks (keep-alive HTTP
+    // sockets, the echo ws used for the passthrough test, an upgrade left hanging). Missing
+    // one makes close() hang forever instead of failing, which is a very expensive way to
+    // find out about it.
     close() {
-      for (const c of state.conns) { try { c.ws.close(); } catch {} }
+      for (const c of state.conns) { try { c.ws.terminate(); } catch {} }
+      for (const s of state.rawUpgrades) { try { s.destroy(); } catch {} }
+      for (const s of state.sockets) { try { s.destroy(); } catch {} }
       return new Promise((res) => server.close(res));
     },
   };

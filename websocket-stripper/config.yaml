@@ -1,5 +1,5 @@
 name: WebSocket Stripper
-version: "0.2.1"
+version: "0.2.2"
 slug: websocket_stripper
 stage: stable
 description: Serves your real HA dashboards but trims the entity websocket to only what each dashboard uses — fast kiosk loads, full fidelity.
@@ -23,10 +23,12 @@ hassio_api: true
 # Docker port map is inert. The single source of truth for the listen port is the `port`
 # option below (default 8099). Reach the add-on at http://<host>:<port>.
 options:
-  dashboards:
-    - fridge-status
-    - home-status
-    - dashboard-deck
+  # Empty on purpose. This used to default to the author's own dashboards, which on anyone
+  # else's instance resolve to nothing — and an empty allowlist is not a harmless no-op: HA
+  # reads `set(msg["entity_ids"]) or None`, so an empty entity_ids means NO filter, and the
+  # add-on would relay the full firehose it exists to prevent. Set this to your own
+  # dashboards' url_path values (Settings -> Dashboards).
+  dashboards: []
   always_forward: []
   never_forward: []
   strip_entities: true
