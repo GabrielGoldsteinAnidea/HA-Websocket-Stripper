@@ -160,6 +160,24 @@ else.
 - Cards referencing entities outside the allowlist will show "unavailable". The allowlist
   is computed generously (all views + template-referenced ids), but if something's
   missing add it via `always_forward`.
+- **Panel-side JavaScript that *reads* an entity needs it in `always_forward`.** The bullet
+  above is the *visible* failure: a card goes "unavailable" and you go looking for it. There
+  is a silent one. A resource that runs on load and subscribes to state — an idle
+  return-to-home timer, a camera pop-up, a heartbeat another system keys on — reads entities
+  that appear on **no card**, so the allowlist never contains them. The module then sees
+  nothing, does nothing, and reports nothing: the dashboard renders pixel-identically and
+  Home Assistant's own side keeps working normally.
+
+  **JavaScript that only *writes* an entity does not need forwarding**, because
+  `callService` is resolved server-side — the write lands whether or not the entity is in
+  that page's `states` map. The asymmetry is worth knowing before widening an allowlist: a
+  per-panel helper that every kiosk *writes* on a heartbeat can stay out of it, while the
+  one `input_text` the same module *reads* has to go in.
+
+  Measured on a 49-panel fleet: four helpers driving a doorbell camera pop-up were missing
+  from `always_forward`, so the module went inert on all of them. It took three days and a
+  person noticing the screens hadn't lit up — the chime still played, because that is Home
+  Assistant driving a media player rather than the panel.
 - The allowlist is computed at startup and **rebuilt live** when a dashboard is saved (or a
   registry changes) — no restart needed. When the rebuild **adds** entities, open dashboard
   connections are dropped so the frontend reconnects and picks them up on its own; no manual
