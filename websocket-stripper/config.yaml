@@ -1,5 +1,5 @@
 name: WebSocket Stripper
-version: "0.2.3"
+version: "0.3.0"
 slug: websocket_stripper
 stage: stable
 description: Serves your real HA dashboards but trims the entity websocket to only what each dashboard uses — fast kiosk loads, full fidelity.
@@ -32,6 +32,24 @@ options:
   always_forward: []
   never_forward: []
   strip_entities: true
+  # PER-CONNECTION SCOPING. Off by default, so an existing install behaves exactly as before.
+  #
+  # With `dashboards` holding more than one kiosk, the allowlist is their UNION and every
+  # connection gets all of it -- so adding a dashboard grows what every OTHER kiosk receives.
+  # On a 50-dashboard fleet that is a panel holding 535 entities where its own dashboard needs
+  # 148. Turn this on and each connection gets only the dashboards mapped to the HA user it
+  # authenticated as; anything unrecognised falls back to the union, i.e. to today's behaviour.
+  #
+  # It only helps if each kiosk signs in as its OWN HA user. One shared user cannot be told
+  # apart, and the websocket carries no other identity -- the dashboard is not in the request
+  # path, because the ws is a separate connection from the page load.
+  scope_per_connection: false
+  # user: the HA user's ID (Settings -> People -> the user -> the id in the URL), not the name.
+  #   The id survives a rename; a name does not, and a scope that stops matching fails SILENTLY
+  #   back to the union.
+  # dashboards: a subset of `dashboards` above. Entries here are not added to the allowlist --
+  #   list them in `dashboards` too, or they resolve to nothing.
+  scope_by_user: []
   port: 8099
   ha_base: ""
   allow_ws_url: ""
@@ -43,6 +61,11 @@ schema:
   never_forward:
     - str
   strip_entities: bool
+  scope_per_connection: "bool?"
+  scope_by_user:
+    - user: str
+      dashboards:
+        - str
   port: "int(1,65535)?"
   ha_base: "str?"
   allow_ws_url: "str?"

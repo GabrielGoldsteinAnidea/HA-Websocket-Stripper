@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.3.0
+
+**Per-connection scoping, off by default** (`scope_per_connection`). The allowlist is the union of
+every configured dashboard and every connection gets all of it, so adding a dashboard grows what
+*every other* kiosk receives — the trim erodes as the list grows and nothing says so. Measured on a
+50-dashboard fleet: a panel held **535** entities where its own dashboard needed **148**, and adding
+three dashboards took one panel from 149 to 187 without that panel being touched. Tuning cannot fix
+it — 183 of those entities appeared on exactly one dashboard, and only 125 on all 50.
+
+The websocket is a separate connection from the page load, so it carries no dashboard path. It does
+carry an `auth` frame, and one `auth/current_user` call says which HA user it belongs to. With the
+option on, a connection receives only the dashboards mapped to its user in `scope_by_user` — keyed
+on the user **id**, which survives a rename where a display name does not. **Every** fallback lands
+on the union: unknown user, no mapping, a scope naming an unserved dashboard, a lookup that fails or
+times out. So an unconfigured or misconfigured install behaves exactly as it did before rather than
+being narrowed, and an *empty* allowlist is still never forwarded, because HA reads that as "no
+filter".
+
+The lookup runs on a **separate short-lived socket**, not the browser's. It has to: HA requires
+message ids to increase on a connection, so injecting a command onto the browser's socket either
+collides with the frontend's sequence or poisons every later message on it. For the same reason,
+holding a frame while the lookup completes holds **every** frame after it — releasing one out of
+order would earn an `id_reuse` rejection on the frame the frontend is waiting for. The lookup starts
+the moment the token crosses, overlapping the browser's own auth round trip, and happens only then:
+an access token is good for 30 minutes, but HA never re-checks one on an already-open socket, so a
+page up for hours holds a long-expired token beside a perfectly healthy connection.
+
+**Allowlist growth now recycles only the connections it affects.** Previously any growth dropped
+every open connection, so a registry event anywhere — a device renamed, an entity added somewhere
+unrelated — reconnected every kiosk at once. On that fleet: 8 whole-fleet reconnect storms in 76
+minutes, of which 16 of 20 recomputes were registry churn and exactly 1 was a dashboard edit.
+
+The test mock now enforces HA's increasing-id rule, so anything that reorders frames fails loudly
+rather than passing here and breaking against a real instance.
+
 ## 0.2.3 — 2026-08-23
 
 Filter resolution and reverse-proxy fixes, all from reported issues.

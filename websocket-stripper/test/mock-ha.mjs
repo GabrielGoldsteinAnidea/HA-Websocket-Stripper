@@ -31,7 +31,10 @@ const DEFAULT_REGISTRIES = {
 
 // `port` pins the listen port so a test can take HA down and bring it back on the same
 // address — i.e. simulate an HA restart under a running proxy.
-export async function startMockHa({ configs = DEFAULT_CONFIGS, states = STATES, registries = DEFAULT_REGISTRIES, templates = DEFAULT_TEMPLATES, port: fixedPort } = {}) {
+// `users` maps access_token -> the object `auth/current_user` returns. Any token not listed
+// still authenticates (the proxy's own control connection uses `test-token`) but has no user,
+// which is the "cannot be identified" case per-connection scoping has to fall back from.
+export async function startMockHa({ configs = DEFAULT_CONFIGS, states = STATES, registries = DEFAULT_REGISTRIES, templates = DEFAULT_TEMPLATES, users = {}, currentUserDelayMs = 0, port: fixedPort } = {}) {
   const port = fixedPort ?? await getFreePort();
   configs = { ...configs };    // per-mock copy, so a setConfig() in one test can't leak into the next
   const state = {
@@ -85,8 +88,29 @@ export async function startMockHa({ configs = DEFAULT_CONFIGS, states = STATES, 
     ws.send(JSON.stringify({ type: 'auth_required', ha_version: '2026.7.0' }));
     ws.on('message', (raw) => {
       let m; try { m = JSON.parse(raw.toString()); } catch { return; }
-      if (m.type === 'auth') { ws.send(JSON.stringify({ type: 'auth_ok', ha_version: '2026.7.0' })); return; }
+      if (m.type === 'auth') {
+        // Remember WHO authenticated, so `auth/current_user` can answer per connection the way
+        // real HA does — that is how per-connection scoping identifies a kiosk.
+        conn.user = users[m.access_token] || null;
+        ws.send(JSON.stringify({ type: 'auth_ok', ha_version: '2026.7.0' }));
+        return;
+      }
+      // Real HA requires message ids to INCREASE on a connection and answers `id_reuse`
+      // otherwise. Modelled here on purpose: anything in the proxy that reorders frames — a
+      // queue, a hold, a retry — would otherwise pass every test here and fail against a real
+      // instance, where the symptom is the frontend's own get_states failing for no reason.
+      if (typeof m.id === 'number') {
+        if (m.id <= (conn.lastId || 0)) {
+          return ws.send(JSON.stringify({ id: m.id, type: 'result', success: false, error: { code: 'id_reuse', message: 'Identifier values have to increase.' } }));
+        }
+        conn.lastId = m.id;
+      }
       const ok = (result) => ws.send(JSON.stringify({ id: m.id, type: 'result', success: true, result }));
+      if (m.type === 'auth/current_user') {
+        if (!conn.user) return ws.send(JSON.stringify({ id: m.id, type: 'result', success: false, error: { code: 'unknown', message: 'no user' } }));
+        if (currentUserDelayMs) return void setTimeout(() => ok(conn.user), currentUserDelayMs);
+        return ok(conn.user);
+      }
       if (m.type in registries) return ok(registries[m.type]);   // config/*_registry/list
       switch (m.type) {
         case 'get_states': return ok(states);
