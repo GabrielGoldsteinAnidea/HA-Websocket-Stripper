@@ -16,7 +16,7 @@ test('config.yaml has no top-level ports: / ports_description: block (inert unde
 });
 
 test('config.yaml exposes the port option in both options and schema', () => {
-  assert.match(cfg, /^\s{2}port:\s*8099\s*$/m, 'options.port default present');
+  assert.match(cfg, /^\s{2}port:\s*9123\s*$/m, 'options.port default present');
   assert.match(cfg, /^\s{2}port:\s*"int\(1,65535\)\?"\s*$/m, 'schema.port present');
 });
 

@@ -12,7 +12,7 @@ uses, so kiosk/wall-panel pages load fast on large instances — with no loss of
 | `always_forward` | list | Entities to forward even if no listed dashboard uses them. Each item is a literal `entity_id` or a `/regex/` (matched against all entities). |
 | `never_forward` | list | Entities to never forward. Applied last — **wins** over `always_forward` and dashboard detection. Literal or `/regex/`. |
 | `strip_entities` | bool | `true` (default) strips the websocket to the allowlist. `false` = full passthrough (for A/B comparison). |
-| `port` | int | Port the add-on listens on (default `8099`). Because it runs with `host_network: true`, this option is how you move it off `8099` — the **Network** tab can't remap a host-network port. Change it if `8099` collides with another add-on (e.g. Zigbee2MQTT). |
+| `port` | int | Port the add-on listens on (default `9123` — Home Assistant is 8123, this sits in front of it). Because it runs with `host_network: true`, this option is how you move it — the **Network** tab can't remap a host-network port. Change it if `9123` collides with something else on the host. |
 | `ha_base` | string | Optional. Override the Home Assistant base URL the add-on proxies to (default `http://homeassistant:8123`). Set this if `host_network` is on and the internal `homeassistant` hostname doesn't resolve — e.g. `http://192.168.4.2:8123`. |
 | `allow_ws_url` | string | Optional. Override the websocket URL used once at startup to precompute the allowlist (default `ws://supervisor/core/websocket`). Set if `supervisor` doesn't resolve under `host_network` — e.g. `ws://192.168.4.2:8123/api/websocket` (also requires a token via `ALLOW_TOKEN`). |
 
@@ -36,11 +36,11 @@ backslashes must be escaped (`"\\."`).
 
 ## Usage
 
-After starting, browse to `http://<ha-host>:8099/<dashboard-url-path>`, e.g.
-`http://homeassistant.local:8099/fridge-status`. Point your kiosk browser at that URL.
+After starting, browse to `http://<ha-host>:9123/<dashboard-url-path>`, e.g.
+`http://homeassistant.local:9123/fridge-status`. Point your kiosk browser at that URL.
 
 > **Port:** because this add-on runs with `host_network: true` (see the tradeoff below),
-> it binds directly on the host and the **Network** tab cannot remap it. If `8099` collides
+> it binds directly on the host and the **Network** tab cannot remap it. If `9123` collides
 > with another add-on (e.g. Zigbee2MQTT), set the `port` option instead.
 
 The first visit prompts a normal HA login (it's a different origin); after that it's your
@@ -86,8 +86,8 @@ real IP never reaches HA and `trusted_networks` can't match it.
 
 **What it costs.**
 
-- **The port is rigid.** It binds `:8099` on the host directly; the **Network** tab can't
-  remap it, so a clash with another add-on on `8099` can't be fixed there (see #6 above).
+- **The port is rigid.** It binds `:9123` on the host directly; the **Network** tab can't
+  remap it, so a clash with another add-on on `9123` can't be fixed there (see #6 above).
 - **Internal DNS can break.** The `homeassistant` and `supervisor` hostnames may not
   resolve in host-network mode. If startup fails, pin them to IPs with the `ha_base` and
   `allow_ws_url` options (e.g. `ha_base: http://192.168.4.2:8123`).

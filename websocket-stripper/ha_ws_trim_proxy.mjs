@@ -20,7 +20,7 @@
 //                  proxy for the allowlist precompute, proxies to http://homeassistant:8123.
 //   * dev/CLI    — reads env vars, uses HA_TOKEN against HA_BASE directly.
 //
-// Env (dev): HA_TOKEN, HA_BASE (default http://homeassistant.mgmt:8123), PORT (8099),
+// Env (dev): HA_TOKEN, HA_BASE (default http://homeassistant.mgmt:8123), PORT (9123),
 //   DASH_PATHS (comma/newline list), ALWAYS_FORWARD, NEVER_FORWARD (literals or /regex/),
 //   STRIP_ENTITIES (default 1; 0 = passthrough for A/B compare),
 //   ALLOW_WS_URL / ALLOW_TOKEN (override the allowlist-precompute connection).
@@ -49,10 +49,13 @@ const toList = (v) => (Array.isArray(v) ? v : String(v ?? '').split(/[\n,]/))
 
 const HA_BASE = process.env.HA_BASE || OPT.ha_base || (inAddon ? 'http://homeassistant:8123' : 'http://homeassistant.mgmt:8123');
 const HA_WS = HA_BASE.replace(/^http/, 'ws') + '/api/websocket';     // browser ws relay target
-// Port precedence: PORT env (dev) > `port` add-on option > 8099. Under host_network the
+// Port precedence: PORT env (dev) > `port` add-on option > 9123. Under host_network the
 // add-on binds this directly on the host, so the option is the only way to move it off
-// 8099 (the Network tab can't remap a host-network port) — see issue #6.
-const PORT = parseInt(process.env.PORT || OPT.port || '8099', 10);
+// 9123 (the Network tab can't remap a host-network port) — see issue #6.
+// 9123 rather than 8099: 8099 is the Zigbee2MQTT add-on's frontend port, so the default
+// collided with one of the most widely installed add-ons and the proxy exited on start.
+// 9123 is also a reminder of what this is — Home Assistant is 8123, this sits in front of it.
+const PORT = parseInt(process.env.PORT || OPT.port || '9123', 10);
 const DASH_PATHS = toList(OPT.dashboards ?? (process.env.DASH_PATHS || process.env.DASH_PATH));
 // strip_entities: true (default) = inject the allowlist so HA streams only needed entities.
 //   false = pass the websocket straight through (full firehose) for A/B comparison.
@@ -665,7 +668,7 @@ server.listen(PORT, () => {
   log(`HA trim-proxy listening on :${PORT}  ->  ${HA_BASE}`);
   DASH_PATHS.forEach((p) => log(`  open: http://<host>:${PORT}/${p}`));
 });
-// A port we can't bind is a real config error (another add-on on :8099 — see issue #6) and
+// A port we can't bind is a real config error (another add-on on :9123 — see issue #6) and
 // worth exiting for; anything else the server surfaces is not worth dying over.
 server.on('error', (e) => {
   if (e.code === 'EADDRINUSE' || e.code === 'EACCES') {

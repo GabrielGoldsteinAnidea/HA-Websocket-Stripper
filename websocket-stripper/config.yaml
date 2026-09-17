@@ -12,7 +12,7 @@ init: false
 # host_network: lets the add-on see the REAL browser IP (not the Docker gateway
 # 172.30.32.1), so HA's trusted_networks auth provider can match the kiosk's LAN IP
 # via X-Forwarded-For. With a mapped port the client IP is rewritten by Docker before
-# the proxy sees it, breaking trusted login. Trade-off: the add-on binds :8099 directly
+# the proxy sees it, breaking trusted login. Trade-off: the add-on binds :9123 directly
 # on the host, and the internal `homeassistant`/`supervisor` DNS names may not resolve —
 # use the ha_base / allow_ws_url options below to pin them to IPs if startup fails.
 host_network: true
@@ -21,7 +21,7 @@ homeassistant_api: true
 hassio_api: true
 # No `ports:` mapping: with host_network the add-on binds the host port directly, so a
 # Docker port map is inert. The single source of truth for the listen port is the `port`
-# option below (default 8099). Reach the add-on at http://<host>:<port>.
+# option below (default 9123). Reach the add-on at http://<host>:<port>.
 options:
   # Empty on purpose. This used to default to the author's own dashboards, which on anyone
   # else's instance resolve to nothing — and an empty allowlist is not a harmless no-op: HA
@@ -32,7 +32,7 @@ options:
   always_forward: []
   never_forward: []
   strip_entities: true
-  port: 8099
+  port: 9123
   ha_base: ""
   allow_ws_url: ""
 schema:

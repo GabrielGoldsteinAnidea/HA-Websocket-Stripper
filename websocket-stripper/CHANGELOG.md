@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+**BREAKING: the default listen port moves from 8099 to 9123.**
+
+`8099` is the Zigbee2MQTT add-on's frontend port. Installing this alongside one of the most
+widely deployed add-ons in the ecosystem meant the proxy exited on start with `EADDRINUSE` —
+the worst possible first run, and the subject of #6. That issue was closed by adding the
+`port` option, which fixes it for anyone who reads the log, but left the colliding default in
+place for everyone who does not.
+
+`9123` was chosen to be self-describing: Home Assistant is `8123`, and this sits in front of
+it.
+
+**If you are relying on the old default, set `port: 8099` explicitly before updating**, or
+re-point your kiosks at the new port. Anyone who already set `port` — including everyone who
+hit the Zigbee2MQTT clash — is unaffected.
+
 ## 0.2.4 — 2026-09-17
 
 Redirects behind an HTTPS terminator, and the companion app. Both from #9's second report.
