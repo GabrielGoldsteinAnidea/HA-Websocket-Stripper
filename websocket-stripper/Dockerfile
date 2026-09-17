@@ -3,9 +3,12 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Install production deps first (cached layer).
-COPY package.json ./
-RUN npm install --omit=dev --no-audit --no-fund
+# Install production deps first (cached layer). The lockfile is copied and honoured: `npm ci`
+# installs exactly what package-lock.json pins and fails if package.json disagrees, where
+# `npm install` without the lockfile resolved every dependency fresh on each build — so two
+# builds of the same commit could ship different dependency trees.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 
 # App code.
 COPY ha_ws_trim_proxy.mjs lovelace_extract.mjs ./
