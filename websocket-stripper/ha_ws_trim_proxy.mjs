@@ -58,6 +58,27 @@ const DASH_PATHS = toList(OPT.dashboards ?? (process.env.DASH_PATHS || process.e
 //   false = pass the websocket straight through (full firehose) for A/B comparison.
 const STRIP = OPT.strip_entities !== undefined ? !!OPT.strip_entities
   : (process.env.STRIP_ENTITIES ?? process.env.TRIM) !== '0';
+// HA's own websocket negotiates permessage-deflate. The `ws` library does NOT enable it
+// server-side by default, so putting this proxy in front of HA silently REMOVES compression
+// from the browser leg — a kiosk that used to receive deflated frames receives plaintext
+// JSON instead. Default on, to restore what clients had before the proxy existed; the cost
+// is deflate CPU on the HA host, which is why it can be turned off on very weak hardware.
+const COMPRESS_WS = OPT.compress_websocket !== undefined ? !!OPT.compress_websocket
+  : (process.env.COMPRESS_WS ?? '1') !== '0';
+
+// Lovelace resources are instance-wide: HA has no per-dashboard scoping, so every kiosk
+// downloads, parses and compiles EVERY custom card in the install. Measured on the instance
+// this was built against: 45 resources, 21MB of JavaScript, for a wall panel that uses four
+// custom card types. With states and registries already trimmed, this is what the load time
+// actually consists of — ~73% of the main thread's busy time is module parse/compile, not
+// script execution, style or layout.
+//
+// Off by default. Unlike entity trimming, a wrongly dropped resource is *visible* — a card
+// renders as "Custom element doesn't exist" — so this is opt-in, and every drop is logged.
+const TRIM_RESOURCES = OPT.trim_resources !== undefined ? !!OPT.trim_resources
+  : (process.env.TRIM_RESOURCES ?? '0') !== '0';
+const RES_ALWAYS = parseRules(OPT.resources_always_forward ?? process.env.RESOURCES_ALWAYS_FORWARD);
+const RES_NEVER = parseRules(OPT.resources_never_forward ?? process.env.RESOURCES_NEVER_FORWARD);
 
 // allowlist-precompute connection (add-on: supervisor proxy + SUPERVISOR_TOKEN)
 const ALLOW_WS_URL = process.env.ALLOW_WS_URL || OPT.allow_ws_url || (inAddon ? 'ws://supervisor/core/websocket' : HA_WS);
@@ -132,7 +153,21 @@ process.on('unhandledRejection', (e) => {
   process.exit(1);
 });
 
+// ALLOW is the UNION across every configured dashboard. It stays the fallback for any
+// connection we can't attribute to one dashboard, so behaviour never regresses below
+// "what this add-on did before per-dashboard trimming existed".
 let ALLOW = new Set();
+// url_path -> that dashboard's own allowlist (overrides already applied). A kiosk that only
+// ever shows one dashboard has no business receiving the other dashboards' entities: on the
+// instance this was built against the union was 388 entities while the kiosk's own dashboard
+// needed 60, so the union costs a small panel ~6x more state than it can display.
+let ALLOW_BY_DASH = new Map();
+// trim_registries: also cut the entity/device/area registries to what the connection can
+// see. Separate from strip_entities because it is the more invasive of the two — states are
+// self-describing, whereas a registry row missing here makes the frontend treat the entity as
+// unregistered. Default on; turn it off first if something renders oddly.
+const TRIM_REGISTRIES = OPT.trim_registries !== undefined ? !!OPT.trim_registries
+  : (process.env.TRIM_REGISTRIES ?? '1') !== '0';
 // Every live browser <-> HA bridge, so a grown allowlist can reach already-open pages
 // (issue #7). See refreshOpenConnections().
 const openBridges = new Set();
@@ -213,12 +248,29 @@ async function renderTemplates(cfg, renderTemplate) {
   return out;
 }
 
-// Build the union allowlist over all configured dashboards using an authed rpc().
+// Apply the always/never overrides to one dashboard's set. Done PER DASHBOARD, not just to
+// the union: `always_forward` exists for entities no card names — the Assist pipeline and
+// wake-word entities a Voice Satellite card drives, say — and those are needed on whichever
+// dashboard the kiosk actually has open, not merely somewhere in the union.
+function applyOverrides(set, realIds) {
+  const out = new Set(set);
+  ALWAYS.forEach((r) => {
+    if (r.literal) out.add(r.literal);
+    else realIds.forEach((eid) => { if (r.re.test(eid)) out.add(eid); });
+  });
+  [...out].forEach((eid) => { if (matchesAny(NEVER, eid)) out.delete(eid); });
+  return out;
+}
+
+// Build the per-dashboard allowlists (and their union) using an authed rpc().
 async function buildAllow(rpc, renderTemplate) {
   const states = await rpc({ type: 'get_states' });
   const realIds = states.map((s) => s.entity_id);
+  const byId = new Map(states.map((st) => [st.entity_id, st]));
   const registries = await fetchRegistries(rpc);
   const union = new Set();
+  const perDash = new Map();
+  const keysByDash = new Map();
   let failed = 0;
   for (const p of DASH_PATHS) {
     try {
@@ -226,6 +278,13 @@ async function buildAllow(rpc, renderTemplate) {
       const tpls = await renderTemplates(cfg, renderTemplate);
       const set = allowlistFor(cfg, states, registries, tpls);
       log(`  ${p}: ${set.size} entities`);
+      perDash.set(p, set);
+      // Resource keys come from the dashboard config AND from the icons of the entities
+      // this dashboard shows. The second half matters: an entity's icon usually lives in
+      // the entity registry, not in any dashboard's YAML, so a config-only scan misses it
+      // and drops the icon pack that renders it. Measured here: 20 entities carry `phu:`
+      // icons set in the registry, and the string "phu" appears in no dashboard config.
+      keysByDash.set(p, resourceKeys(cfg, set, byId));
       set.forEach((e) => union.add(e));
     } catch (e) { failed++; log(`  ${p}: FAILED ${e.message}`); }
   }
@@ -242,14 +301,19 @@ async function buildAllow(rpc, renderTemplate) {
     throw new Error(`no dashboard config available yet (all ${failed} failed) — HA not ready, or none of these url_paths exist`);
   }
   const baseN = union.size;
-  ALWAYS.forEach((r) => {
-    if (r.literal) union.add(r.literal);
-    else realIds.forEach((eid) => { if (r.re.test(eid)) union.add(eid); });
-  });
-  const afterAlways = union.size;
-  [...union].forEach((eid) => { if (matchesAny(NEVER, eid)) union.delete(eid); });
-  log(`overrides: base ${baseN}, +always ${afterAlways - baseN}, -never ${afterAlways - union.size}`);
-  return union;
+  for (const [p, set] of perDash) perDash.set(p, applyOverrides(set, realIds));
+  const withOverrides = applyOverrides(union, realIds);
+  // Registry reachability is computed against the UNION deliberately: a connection served a
+  // single dashboard's entities may still legitimately name a device or area belonging to
+  // another, and a device row wrongly dropped costs a name with no bandwidth saving worth it.
+  if (TRIM_REGISTRIES) {
+    rebuildRegCache(registries, withOverrides);
+    log(`  registry reach: ${REG_CACHE.devices.size} device(s), ${REG_CACHE.areas.size} area(s)`);
+  }
+  await buildResources(rpc, keysByDash);
+  const afterAlways = new Set([...union, ...withOverrides]).size;
+  log(`overrides: base ${baseN}, +always ${afterAlways - baseN}, -never ${afterAlways - withOverrides.size}`);
+  return { union: withOverrides, perDash };
 }
 
 // Swap in a freshly-computed allowlist and log exactly what changed — the entity ids
@@ -263,11 +327,22 @@ async function buildAllow(rpc, renderTemplate) {
 // a restart, nothing would ever rebuild it, leaving cards permanently "unavailable". Over-
 // including is harmless here by design (see allowlistFor); under-including breaks cards. An
 // actual dashboard/registry edit still replaces, so removals take effect.
-function applyAllow(next, why, { merge = false } = {}) {
-  if (merge) next = new Set([...ALLOW, ...next]);
+function applyAllow(built, why, { merge = false } = {}) {
+  let next = built.union;
+  let nextByDash = built.perDash;
+  if (merge) {
+    next = new Set([...ALLOW, ...next]);
+    // Merge per dashboard too, for the same reason the union is merged: a core that has just
+    // restarted can answer a rebuild with a partial state machine, and a dashboard that came
+    // back short would otherwise permanently lose entities nothing will rebuild.
+    const merged = new Map(ALLOW_BY_DASH);
+    for (const [p, s] of nextByDash) merged.set(p, new Set([...(ALLOW_BY_DASH.get(p) ?? []), ...s]));
+    nextByDash = merged;
+  }
   const added = [...next].filter((e) => !ALLOW.has(e)).sort();
   const removed = [...ALLOW].filter((e) => !next.has(e)).sort();
   ALLOW = next;
+  ALLOW_BY_DASH = nextByDash;
   const fmt = (a) => (a.length > 25 ? `${a.slice(0, 25).join(', ')} …(+${a.length - 25} more)` : a.join(', '));
   log(`allowlist ${why}: ${ALLOW.size} entities (+${added.length} -${removed.length})`);
   if (added.length) log(`  +added: ${fmt(added)}`);
@@ -366,7 +441,10 @@ function startController() {
           try {
             backoff = 1000; attempts = 0;
             const next = await buildAllow(rpc, renderTemplate);
-            if (!settled) { ALLOW = next; settled = true; ALLOW_READY = true; resolve(ALLOW); }
+            if (!settled) {
+              ALLOW = next.union; ALLOW_BY_DASH = next.perDash;
+              settled = true; ALLOW_READY = true; resolve(ALLOW);
+            }
             else applyAllow(next, 'recomputed (reconnect)', { merge: true });
             // lovelace_updated -> a dashboard's cards changed. The *_registry_updated
             // events -> a device moved area, a label was (un)assigned, etc., which can
@@ -541,6 +619,327 @@ proxy.on('error', (e, req, res) => {
     else if (res && typeof res.destroy === 'function') res.destroy();   // ws upgrade socket
   } catch {}
 });
+// ---- registry trimming ----
+// The frontend asks for these three registries on every load, and each is instance-wide.
+// The entity registry in particular is one row per entity — the single largest payload left
+// once states are trimmed, and the one that scales with instance size rather than with what
+// the dashboard shows.
+const REGISTRY_TYPES = new Map([
+  ['config/entity_registry/list', 'entity'],
+  ['config/entity_registry/list_for_display', 'entity_display'],
+  ['config/device_registry/list', 'device'],
+  ['config/area_registry/list', 'area'],
+]);
+
+// Trim one registry result to what `allow` can reach. Entity rows are filtered directly;
+// device and area rows are kept only when a surviving entity still points at them, so a
+// card's "Kitchen / Ceiling Light" secondary text keeps resolving. Rows we don't understand
+// are kept — over-including is harmless, under-including breaks names.
+function trimRegistry(kind, rows, allow) {
+  // `list_for_display` is NOT a list. It answers with an object — `{entity_categories,
+  // entities}` — whose rows use two-letter keys (`ei` entity_id, `di` device_id, `ai`
+  // area_id, `en` name, `pl` platform...). Measured on a 9,553-entity instance it is
+  // 1.44MB, and it was the single largest thing the kiosk still downloaded: 58% of the
+  // whole websocket load, because the array-shaped guard below passed it straight through.
+  // Filter `entities` and leave `entity_categories` (a tiny id->name map) alone.
+  if (kind === 'entity_display') {
+    const list = rows?.entities;
+    if (!Array.isArray(list) || !list.every((r) => r && typeof r === 'object' && 'ei' in r)) return rows;
+    return { ...rows, entities: list.filter((r) => allow.has(r.ei)) };
+  }
+  if (kind === 'entity') {
+    // Rows we don't understand are kept: over-including is harmless, under-including
+    // breaks names.
+    if (!Array.isArray(rows) || !rows.every((r) => r && typeof r === 'object' && 'entity_id' in r)) return rows;
+    return rows.filter((r) => allow.has(r.entity_id));
+  }
+  if (!Array.isArray(rows)) return rows;
+  // Devices and areas are kept only where a surviving entity still reaches them, so a tile's
+  // "Kitchen — Ceiling Light" secondary text still resolves. The reachable sets come from
+  // REG_CACHE, built alongside the allowlist; if it's empty we haven't got a registry yet and
+  // pass everything through rather than blanking names.
+  const keep = kind === 'device' ? REG_CACHE.devices : REG_CACHE.areas;
+  if (!keep.size) return rows;
+  const idOf = (r) => (kind === 'device' ? r?.id : (r?.area_id ?? r?.id));
+  return rows.filter((r) => keep.has(idOf(r)));
+}
+
+// Which devices/areas the current allowlist still reaches. Built from the control
+// connection's own registry fetch, so a browser asking for devices before entities still
+// gets a correct answer. Areas come from the entities directly AND from the devices those
+// entities belong to, because an entity with no area_id of its own inherits its device's.
+const REG_CACHE = { devices: new Set(), areas: new Set() };
+function rebuildRegCache(registries, allow) {
+  const devices = new Set();
+  const areas = new Set();
+  for (const r of registries?.entities ?? []) {
+    if (!allow.has(r.entity_id)) continue;
+    if (r.device_id) devices.add(r.device_id);
+    if (r.area_id) areas.add(r.area_id);
+  }
+  for (const d of registries?.devices ?? []) {
+    if (devices.has(d.id) && d.area_id) areas.add(d.area_id);
+  }
+  REG_CACHE.devices = devices;
+  REG_CACHE.areas = areas;
+}
+
+// ---- per-dashboard Lovelace resources ----
+// Namespaces the frontend resolves itself; an `mdi:` icon needs no custom resource.
+const BUILTIN_ICON_NS = new Set(['mdi', 'hass', 'hassio', 'homeassistant', 'custom']);
+
+const RESOURCE_CACHE = new Map();     // url -> { tested:Set, present:Set|null, bytes }
+let RESOURCES_BY_DASH = new Map();    // dash -> Set(url) to keep
+// What a connection is actually served: the union of every configured dashboard's keep
+// set. Without per-connection scoping the proxy cannot know which dashboard a socket is
+// showing, and serving less than the union would break whichever one it turns out to be.
+// This still drops every resource NO dashboard references. It narrows to a single
+// dashboard's set once per-connection scoping (PR #13) lands.
+let RESOURCES_KEEP = new Set();
+
+// Every token a dashboard might need a resource FOR: `custom:x` card/row/badge/feature types,
+// and icon-pack prefixes (`foo:bar` where foo isn't built in).
+//
+// These are matched as plain substrings against each resource's body rather than by scanning
+// for `customElements.define(...)`. That looks like the rigorous approach and is in fact the
+// broken one: big bundles (mushroom, 639KB) construct element names at runtime, so a define()
+// scan finds almost nothing and would drop a resource the dashboard needs. The literal name
+// is still present in the bundle, so a substring test finds it. Errs toward keeping — a false
+// positive costs bytes, a false negative breaks a card.
+// Both halves of the icon pattern must START WITH A LETTER, and keys shorter than
+// MIN_KEY are discarded. That is not fussiness — a loose pattern here silently disables the
+// whole feature. `16:9` (a picture card's aspect_ratio) and `06:00` (any schedule) match a
+// digit-tolerant pattern and yield the keys "16" and "06", and a two-character string occurs
+// in every minified bundle ever written, so every resource "matches" and nothing is dropped.
+// Observed exactly that: 45 resources, 39 kept, 97KB saved instead of 18MB.
+const MIN_KEY = 3;
+function resourceKeys(cfg, allowed = null, byId = null) {
+  const cards = new Set();      // custom card/row/badge/feature types
+  const icons = new Set();      // non-builtin icon namespaces
+  const addIcon = (ns) => { if (ns.length >= MIN_KEY && !BUILTIN_ICON_NS.has(ns)) icons.add(ns); };
+  // Icons of the entities this dashboard actually shows, which are typically registry
+  // values rather than anything written in the config.
+  if (allowed && byId) {
+    for (const id of allowed) {
+      const ic = byId.get(id)?.attributes?.icon;
+      if (typeof ic !== 'string') continue;
+      const m = ic.match(/^([a-z][a-z0-9_]{2,15}):[a-z]/);
+      if (m) addIcon(m[1]);
+    }
+  }
+  (function walk(n) {
+    if (Array.isArray(n)) return n.forEach(walk);
+    if (n && typeof n === 'object') return Object.values(n).forEach(walk);
+    if (typeof n !== 'string') return;
+    if (n.startsWith('custom:') && n.length > 7 + MIN_KEY) cards.add(n.slice(7));
+    const ic = n.match(/^([a-z][a-z0-9_]{2,15}):([a-z][a-z0-9-]*)$/);
+    if (ic) addIcon(ic[1]);
+  })(cfg);
+  return { cards, icons };
+}
+
+// A card type split into candidate identifying parts. Split on `-` only: an underscore
+// usually sits inside one meaningful word (`print_status`), and breaking it would leave
+// fragments generic enough to match anything.
+function cardFragments(type) {
+  return type.split('-').filter((p) => p.length >= 4);
+}
+
+// How many resources contain each fragment, and the cutoff above which a fragment is too
+// common to identify anything. MEASURED rather than a hand-maintained stop-word list: the
+// first attempt at this used one, and `grid`, `layout`, `entity` and `progress` all slipped
+// through it and matched nearly every bundle on the instance — which took one panel from
+// 2,998KB to 11,876KB. A fragment present in a quarter of all resources says nothing.
+let FRAG_DF = new Map();
+let FRAG_DF_MAX = 0;
+const isDistinctive = (f) => (FRAG_DF.get(f) || 0) <= FRAG_DF_MAX;
+// A fragment so rare it effectively names one bundle. Kept separate from "distinctive"
+// because the evidence is much stronger: `mushroom` appears in 2 files out of 48, so a bundle
+// containing it is almost certainly the Mushroom bundle, whereas `cover` tells you nothing.
+let FRAG_RARE_MAX = 2;
+const isRare = (f) => (FRAG_DF.get(f) || 0) <= FRAG_RARE_MAX;
+
+// Does this bundle look like it provides `type`?
+//
+// The literal name is the strong signal. The fragment fallback exists for bundles that BUILD
+// their element names at runtime: `ha-bambulab-cards.js` is 3.2MB, a dashboard renders
+// `ha-bambulab-print_status-card`, and that string appears nowhere in the file — only
+// `bambulab` and `print_status` separately.
+//
+// Two earlier rules made a very common case impossible, and both are gone:
+//
+//   - requiring EVERY fragment to be present. Mushroom registers its elements from template
+//     literals, so `mushroom-cover-card` appears nowhere in `mushroom.js` — and neither does
+//     the bare word `cover`. One missing generic word discarded the bundle even though the
+//     near-unique `mushroom` was sitting right there.
+//   - requiring TWO distinctive fragments, which no `<oneword>-<generic>-card` name can ever
+//     satisfy, because it only has one distinctive word to give.
+//
+// Together they silently dropped the entire Mushroom family — one of the most widely
+// installed card sets there is — with no error anywhere, just blank cards on the dashboard.
+//
+// Now: one RARE fragment carries a match on its own; otherwise fall back to two merely
+// distinctive ones. Erring toward keeping is the right bias here, because the two failure
+// modes are not symmetric — a resource kept needlessly costs some bytes, a resource wrongly
+// dropped breaks a card and says nothing about why.
+function cardMatchesBody(type, cached) {
+  if (cached.literal.has(type)) return true;
+  const present = cardFragments(type).filter((f) => cached.frags.has(f));
+  if (!present.length) return false;
+  if (present.some(isRare)) return true;
+  return present.filter(isDistinctive).length >= 2;
+}
+
+// An icon namespace is matched two ways, and it needs both.
+//
+// A *user* of the namespace writes `cbi:bulb`, so the colon form finds them. Matching the
+// bare namespace instead is how the 3-character `cbi` came to keep 4.8MB of bundles that
+// merely contained those letters in base64 blobs and minified identifiers — `cbi:` appeared
+// in none of them.
+//
+// But the *provider* never writes the colon form at all: it registers the namespace as a
+// key, `customIconsets["cil"]`. Matching only the colon form drops the very bundle that
+// serves the icons, which is what happened to custom-icons.js, the provider of `cil:`.
+const ICON_REG = (ns) => new RegExp('customIcons(?:ets)?\\s*\\[\\s*[\'"`]' + ns + '[\'"`]');
+const bodyHasIcon = (body, ns) => body.includes(ns + ':') || ICON_REG(ns).test(body);
+
+// never > always > content match > fail-open. A resource we could not read is always kept:
+// being unable to check is not evidence it is unused.
+// Resource rules match on a SUBSTRING of the URL, not the whole of it — unlike entity rules,
+// which compare entity_ids exactly. Nobody wants to write out
+// `/hacsfiles/kiosk-mode/kiosk-mode.js?hacstag=1234567890`; they want to write `kiosk-mode`.
+const matchesUrl = (rules, url) => rules.some((r) => (r.re ? r.re.test(url) : url.includes(r.literal)));
+
+function keepResource(url, keys) {
+  if (matchesUrl(RES_NEVER, url)) return false;
+  if (matchesUrl(RES_ALWAYS, url)) return true;
+  const c = RESOURCE_CACHE.get(url);
+  if (!c || c.unreadable) return true;            // cannot check, so keep
+  for (const k of keys.icons) if (c.icons.has(k)) return true;
+  for (const k of keys.cards) if (cardMatchesBody(k, c)) return true;
+  return false;
+}
+
+async function buildResources(rpc, keysByDash) {
+  if (!TRIM_RESOURCES) return;
+  let rows;
+  try { rows = await rpc({ type: 'lovelace/resources' }); }
+  catch (e) { log(`  resources: FAILED (${e.message}) — forwarding all resources`); RESOURCES_BY_DASH = new Map(); RESOURCES_KEEP = new Set(); return; }
+  if (!Array.isArray(rows)) { RESOURCES_BY_DASH = new Map(); RESOURCES_KEEP = new Set(); return; }
+
+  // Every token any dashboard could match on, tagged by kind so a card type and an icon
+  // namespace that happen to share a name can never be confused for one another.
+  const unionCards = new Set(), unionIcons = new Set();
+  for (const ks of keysByDash.values()) {
+    ks.cards.forEach((k) => unionCards.add(k));
+    ks.icons.forEach((k) => unionIcons.add(k));
+  }
+  const unionFrags = new Set();
+  for (const c of unionCards) for (const f of cardFragments(c)) unionFrags.add(f);
+  const unionKeys = new Set([...[...unionCards].map((k) => 'card:' + k),
+                             ...[...unionIcons].map((k) => 'icon:' + k),
+                             ...[...unionFrags].map((k) => 'frag:' + k)]);
+  // One fetch per resource, tested against every dashboard's keys at once. Bodies are read
+  // and discarded one at a time — the whole set is ~21MB on a large install and must not be
+  // held in memory. The cache is keyed by URL, which carries HACS's version tag, so an
+  // updated card re-fetches on its own.
+  for (const r of rows) {
+    const c = RESOURCE_CACHE.get(r.url);
+    if (c && [...unionKeys].every((k) => c.tested.has(k))) continue;
+    try {
+      const abs = /^https?:/i.test(r.url) ? r.url : HA_BASE + r.url;
+      const body = await (await fetch(abs, { signal: AbortSignal.timeout(20000) })).text();
+      RESOURCE_CACHE.set(r.url, {
+        tested: new Set(unionKeys),
+        literal: new Set([...unionCards].filter((k) => body.includes(k))),
+        icons: new Set([...unionIcons].filter((k) => bodyHasIcon(body, k))),
+        frags: new Set([...unionFrags].filter((f) => body.includes(f))),
+        unreadable: false,
+        bytes: body.length,
+      });
+    } catch (e) {
+      RESOURCE_CACHE.set(r.url, { tested: new Set(unionKeys), literal: new Set(), icons: new Set(), frags: new Set(), unreadable: true, bytes: 0 });
+      logThrottled(`res:${r.url}`, `  resources: could not read ${r.url} (${e.message}) — always forwarding it`);
+    }
+  }
+
+  // Document frequency across the resources we could actually read. A fragment in more than
+  // a quarter of them identifies nothing, so it cannot carry a fragment match on its own.
+  const readable = rows.filter((r) => !RESOURCE_CACHE.get(r.url)?.unreadable);
+  FRAG_DF = new Map();
+  for (const f of unionFrags) {
+    FRAG_DF.set(f, readable.filter((r) => RESOURCE_CACHE.get(r.url).frags.has(f)).length);
+  }
+  FRAG_DF_MAX = Math.max(1, Math.floor(readable.length * 0.25));
+  // Both cutoffs scale with how many resources the instance has, so a small install and a
+  // large one behave the same way. 5% is "this word appears in almost nothing", with a floor
+  // of 2 so a tiny instance still has a workable notion of rare.
+  FRAG_RARE_MAX = Math.max(2, Math.floor(readable.length * 0.05));
+  const common = [...unionFrags].filter((f) => !isDistinctive(f));
+  if (common.length) {
+    log(`  resources: ${common.length} fragment(s) too common to identify a card (>${FRAG_DF_MAX} of ${readable.length}): ${common.sort().join(', ')}`);
+  }
+
+  const byDash = new Map();
+  for (const [dash, keys] of keysByDash) {
+    const keep = new Set();
+    let keptB = 0, dropB = 0;
+    for (const r of rows) {
+      const bytes = RESOURCE_CACHE.get(r.url)?.bytes || 0;
+      if (keepResource(r.url, keys)) { keep.add(r.url); keptB += bytes; }
+      else dropB += bytes;
+    }
+    byDash.set(dash, keep);
+    const needs = [...[...keys.cards].sort(), ...[...keys.icons].sort().map((i) => i + ':')];
+    log(`  resources ${dash} needs: ${needs.join(', ') || '(none)'}`);
+    log(`  resources ${dash}: ${keep.size}/${rows.length} kept (${(keptB / 1024).toFixed(0)}KB), ${rows.length - keep.size} dropped (${(dropB / 1024).toFixed(0)}KB)`);
+  }
+  RESOURCES_BY_DASH = byDash;
+  const servedUnion = new Set();
+  for (const keep of byDash.values()) for (const u of keep) servedUnion.add(u);
+  RESOURCES_KEEP = servedUnion;
+  log(`  resources served: ${servedUnion.size}/${rows.length} (union of all dashboards)`);
+
+  // Resources dropped by EVERY dashboard get their own warning, because this set is the
+  // exact signature of the one failure the tuning loop cannot catch.
+  //
+  // The documented way to tune this option is "load the dashboard and see what looks
+  // wrong". That works for a card that fails to render or an icon that goes blank. It does
+  // not work for a resource that registers no element and is named by no dashboard, but
+  // runs on load and subscribes to state — an idle timer, a camera pop-up, a heartbeat.
+  // Drop one of those and the dashboard is pixel-identical; only the behaviour stops, and
+  // nothing reports it on either side. (Reported by @ajguerre1 on upstream #15, who lost a
+  // doorbell pop-up on 28 panels for three days to the same failure one level down, via
+  // entities.)
+  //
+  // The proxy cannot tell that class apart from a genuinely unused resource — but the
+  // reader can, instantly. So say which ones they are rather than burying them in the
+  // per-dashboard drop lists.
+  const servedAnywhere = new Set();
+  for (const keep of byDash.values()) for (const u of keep) servedAnywhere.add(u);
+  const droppedByAll = rows.filter((r) => !servedAnywhere.has(r.url));
+  if (droppedByAll.length) {
+    const kb = droppedByAll.reduce((t, r) => t + (RESOURCE_CACHE.get(r.url)?.bytes || 0), 0) / 1024;
+    log(`  resources: ${droppedByAll.length} dropped by ALL dashboards (no dashboard references them), ${kb.toFixed(0)}KB.`);
+    log('    If any of these run on load rather than rendering a card — an idle timer, a');
+    log('    pop-up, a heartbeat — add them to resources_always_forward. Dropping one of');
+    log('    those is INVISIBLE: the dashboard renders normally and only the behaviour stops.');
+    for (const r of droppedByAll) {
+      const b = ((RESOURCE_CACHE.get(r.url)?.bytes || 0) / 1024).toFixed(0);
+      log(`      drop ${String(b).padStart(6)}KB ${r.url.split('?')[0]}`);
+    }
+  }
+}
+
+// NOTE: there is deliberately NO per-connection dashboard attribution here.
+// An earlier version of this branch inferred it from the page GET preceding the
+// websocket, keyed by client IP. That is a heuristic — it breaks behind NAT, and a
+// client fetching a dashboard's config is not necessarily displaying it. PR #13
+// resolves the user from the `auth` frame the client actually presents, which is
+// strictly better, so this branch no longer competes with it. Everything below
+// trims to whatever allowlist the connection ends up with, so it narrows on its
+// own once per-connection scoping lands.
+
 const server = http.createServer((req, res) => proxy.web(req, res));
 
 // ---- websocket upgrades ----
@@ -548,7 +947,14 @@ const server = http.createServer((req, res) => proxy.web(req, res));
 // upgrade passes straight through to HA — notably /api/webrtc/ws (go2rtc / WebRTC & MSE
 // camera-stream signaling) and Assist-pipeline sockets. Destroying them (the old default
 // branch) broke camera streams with ws close code 1006.
-const wss = new WebSocketServer({ noServer: true });
+// threshold: don't spend CPU deflating small control chatter; the payloads that matter
+// (get_states, registries, get_services) are hundreds of KB and compress roughly 10x.
+// concurrencyLimit caps simultaneous zlib jobs so a burst of kiosks reconnecting at once
+// cannot saturate the host. Deflate runs on libuv's threadpool, not the main loop.
+const wss = new WebSocketServer({
+  noServer: true,
+  perMessageDeflate: COMPRESS_WS ? { threshold: 1024, concurrencyLimit: 10 } : false,
+});
 server.on('upgrade', (req, socket, head) => {
   // A raw upgrade socket arrives with NO 'error' listener, and http-proxy only attaches one
   // once HA has answered 101 (see ws-incoming.js). Anything that errors in that window — an
@@ -584,10 +990,15 @@ server.on('upgrade', (req, socket, head) => {
   }
 });
 
-function bridge(browserWs) {
+// `allow` is THIS connection's allowlist — one dashboard's, or the union when the client
+// couldn't be attributed. Captured per bridge rather than read from the global, so two
+// kiosks on different dashboards get genuinely different subscriptions.
+function bridge(browserWs, allow = ALLOW) {
   const haWs = new WebSocket(HA_WS, { perMessageDeflate: true, maxPayload: 0 });
   const getStatesIds = new Set();
   const subEntityIds = new Set();   // subscribe_entities subs we injected the allowlist into
+  const registryIds = new Map();    // request id -> which registry, to trim its result
+  const resourceIds = new Set();    // lovelace/resources requests, to trim their result
   const queue = []; let haOpen = false;
   const toHA = (s) => { if (haOpen) haWs.send(s); else queue.push(s); };
 
@@ -597,18 +1008,34 @@ function bridge(browserWs) {
     let s = raw.toString(); let m;
     try { m = JSON.parse(s); } catch { return toHA(s); }
     if (STRIP && m && m.type === 'get_states') getStatesIds.add(m.id);
+    if (STRIP && TRIM_REGISTRIES && m && REGISTRY_TYPES.has(m.type)) registryIds.set(m.id, REGISTRY_TYPES.get(m.type));
+    if (STRIP && TRIM_RESOURCES && m && m.type === 'lovelace/resources') resourceIds.add(m.id);
     if (STRIP && m && m.type === 'subscribe_entities' && !m.entity_ids) {
       // Belt-and-braces to the upgrade gate: an empty entity_ids is NOT "subscribe to
       // nothing", it's "no filter" (HA: `set(msg["entity_ids"]) or None`). Sending one would
       // invert the add-on's entire purpose, so drop the connection instead.
-      if (!ALLOW.size) {
+      if (!allow.size) {
         logThrottled('empty-allow', 'ERROR: refusing subscribe_entities — the allowlist is empty, and forwarding that would stream EVERY entity. Check the `dashboards` option.');
         return close();
       }
-      m.entity_ids = [...ALLOW];           // HA now streams only the allowlist
+      m.entity_ids = [...allow];           // HA now streams only this connection's allowlist
       subEntityIds.add(m.id);              // remember it, to defensively re-filter its events
       s = JSON.stringify(m);
     }
+    // NB: `lovelace/config` is deliberately NOT used to re-attribute a live connection.
+    //
+    // It looks like the perfect signal — the frontend naming the dashboard it is about to
+    // render — but a client fetching a dashboard's config does not mean it is DISPLAYING
+    // that dashboard. Kiosk Satellite, for one, enumerates every dashboard's views at
+    // startup, so a panel showing `basement-stairs-panel` requests the config of all five.
+    // Acting on that flipped the stored hint to whichever dashboard was enumerated last and
+    // recycled the socket to "follow" it, which produced a reconnect storm and then served
+    // the panel the wrong dashboard's allowlist. Observed live, 2026-09-11.
+    //
+    // The page GET that precedes the websocket is the only signal that actually means "this
+    // client is displaying this dashboard", so it is the only one used. The cost is that a
+    // client-side navigation to a DIFFERENT dashboard keeps the old allowlist until the page
+    // reloads; set `per_dashboard: false` if that matters more than the trimming does.
     if (m && m.type === 'unsubscribe_events' && m.subscription != null) subEntityIds.delete(m.subscription);
     toHA(s);
   });
@@ -618,10 +1045,46 @@ function bridge(browserWs) {
     try { m = JSON.parse(s); } catch { return safeSend(s); }
     if (STRIP && m && m.type === 'result' && getStatesIds.has(m.id) && Array.isArray(m.result)) {
       const before = m.result.length;
-      m.result = m.result.filter((e) => ALLOW.has(e.entity_id));
+      m.result = m.result.filter((e) => allow.has(e.entity_id));
       getStatesIds.delete(m.id);
       s = JSON.stringify(m);
       log(`get_states trimmed ${before} -> ${m.result.length}`);
+    }
+    // Registry trimming. The entity registry is one row per entity for the WHOLE instance —
+    // on a 9,553-entity install that is megabytes of JSON the kiosk parses on every load,
+    // dwarfing the states we just trimmed to a few hundred. Cut it to the entities this
+    // connection can actually see, plus the devices/areas those rows still reference so
+    // names and area assignments keep resolving.
+    // Note the guard is on `m.result` being an object of ANY shape, not on it being an
+    // array: `list_for_display` answers with `{entity_categories, entities}`, and an
+    // Array.isArray() guard here silently skipped the largest payload of the lot.
+    if (STRIP && TRIM_REGISTRIES && m && m.type === 'result' && registryIds.has(m.id) && m.result && typeof m.result === 'object') {
+      const kind = registryIds.get(m.id);
+      registryIds.delete(m.id);
+      const rowsOf = (r) => (Array.isArray(r) ? r.length : (Array.isArray(r?.entities) ? r.entities.length : -1));
+      const before = rowsOf(m.result);
+      m.result = trimRegistry(kind, m.result, allow);
+      const after = rowsOf(m.result);
+      if (after !== before) {
+        s = JSON.stringify(m);
+        logThrottled(`reg:${kind}`, `${kind} registry trimmed ${before} -> ${after}`);
+      }
+    }
+    // Lovelace resources, trimmed to the ones this dashboard actually needs. Only ever for a
+    // connection we attributed to a dashboard: an unattributed connection gets the union of
+    // entities, and must likewise get every resource — guessing wrong here renders a card as
+    // "Custom element doesn't exist", which is far worse than sending bytes it won't use.
+    if (STRIP && TRIM_RESOURCES && m && m.type === 'result' && resourceIds.has(m.id) && Array.isArray(m.result)) {
+      resourceIds.delete(m.id);
+      const keep = RESOURCES_KEEP;
+      if (keep?.size) {
+        const before = m.result.length;
+        m.result = m.result.filter((r) => keep.has(r?.url));
+        if (m.result.length !== before) {
+          s = JSON.stringify(m);
+          logThrottled('resources', `lovelace resources trimmed ${before} -> ${m.result.length}`);
+        }
+      }
     }
     // Defensive egress filter (belt-and-suspenders): HA already trims to the injected
     // entity_ids, so this is normally a no-op. But if a future HA ever ignored that
@@ -633,12 +1096,12 @@ function bridge(browserWs) {
       const ev = m.event; let changed = false;
       for (const k of ['a', 'c']) {
         if (ev[k]) for (const eid of Object.keys(ev[k])) {
-          if (!ALLOW.has(eid)) { delete ev[k][eid]; changed = true; }
+          if (!allow.has(eid)) { delete ev[k][eid]; changed = true; }
         }
       }
       if (Array.isArray(ev.r)) {
         const before = ev.r.length;
-        ev.r = ev.r.filter((eid) => ALLOW.has(eid));
+        ev.r = ev.r.filter((eid) => allow.has(eid));
         if (ev.r.length !== before) changed = true;
       }
       if (changed) s = JSON.stringify(m);
@@ -657,6 +1120,7 @@ function bridge(browserWs) {
 // ---- boot ----
 log(`ha-ws-trim-proxy v${VERSION} starting`);
 log(`mode: ${inAddon ? 'add-on' : 'dev'} | target ${HA_BASE} | allowlist via ${ALLOW_WS_URL}`);
+log(`options: trim_registries=${TRIM_REGISTRIES} compress_websocket=${COMPRESS_WS} trim_resources=${TRIM_RESOURCES}`);
 // Listen FIRST, before HA is known to be reachable. The add-on and HA core restart together
 // (host boot, a core update), and core can take minutes to answer — the proxy's job is to
 // wait for it, not to exit. HTTP proxies through immediately (502 while HA is down, like any

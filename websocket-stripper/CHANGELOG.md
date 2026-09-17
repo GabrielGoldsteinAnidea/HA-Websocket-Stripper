@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+**Registry trimming, including `list_for_display`** (`trim_registries`, default on). The entity,
+device and area registries are instance-wide and asked for on every page load; the entity
+registry is one row per entity, the largest payload left once states are trimmed. Rows are cut
+to the entities the connection can see, and devices/areas to those a surviving entity still
+references, so names and area labels keep resolving. `config/entity_registry/list_for_display`
+answers with an object, not an array, and an `Array.isArray()` guard had been passing it through
+untouched: measured on a 9,553-entity instance it was 1.44MB, 58% of the whole websocket load.
+
+**The Configuration tab explains itself.** `translations/en.yaml` gives every option a name and
+description, with the warnings on the screen where the option is toggled. Two tests keep the
+file in step with the schema in both directions. README and DOCS no longer claim registries
+"pass through untouched".
+
+**Resource trimming** (`trim_resources`, off by default). Lovelace resources are instance-wide,
+so every kiosk parses every custom card installed — 21MB of JavaScript for a four-card wall
+panel on the instance this was built against, and ~73% of the main thread's busy time. Each
+dashboard's card types and icon namespaces are matched against each resource's body (literal
+name, then rare or distinctive fragments, since bundles like Mushroom build their element names
+at runtime and never write them down); the union across dashboards is served, and resources no
+dashboard references are dropped. Off by default because one class of drop is silent: a module
+that registers no element and runs on load — an idle timer, a pop-up, a heartbeat. The log names
+every resource dropped by ALL dashboards for exactly that reason; `resources_always_forward` and
+`resources_never_forward` override the match. Measured: no load-time win on its own, stated
+plainly in DOCS; the saving is bytes and parse work.
+
+**Fix: the add-on was removing websocket compression.** Home Assistant's own websocket
+negotiates `permessage-deflate`, but the `ws` library does not enable it server-side by
+default — so putting this proxy in front of HA silently downgraded every kiosk from deflated
+frames to plaintext JSON. Confirmed by comparing the negotiated `Sec-WebSocket-Extensions` on
+HA directly (`permessage-deflate`) against the proxy (nothing).
+
+Now on by default via the new `compress_websocket` option, with a `threshold` so small control
+frames don't pay for it and a `concurrencyLimit` so a burst of reconnecting kiosks can't
+saturate the host. Deflate runs on libuv's threadpool rather than the main loop. Turn it off
+on very weak hardware.
+
 ## 0.2.4 — 2026-09-17
 
 Redirects behind an HTTPS terminator, and the companion app. Both from #9's second report.

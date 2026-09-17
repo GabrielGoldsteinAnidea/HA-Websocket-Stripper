@@ -32,6 +32,38 @@ options:
   always_forward: []
   never_forward: []
   strip_entities: true
+  # Also trim the entity/device/area registries to what the connection can see. This is the
+  # larger payload on a big instance once states are trimmed. Turn OFF first if names, areas
+  # or device links render oddly.
+  trim_registries: true
+  # HA's own websocket negotiates permessage-deflate; the `ws` library does not do so
+  # server-side by default, so putting this add-on in front of HA silently removes compression
+  # from the browser leg. On by default to restore it. Turn off only on very weak hardware
+  # where deflate CPU costs more than the bytes it saves.
+  # Memory: each compressed connection keeps a ~300 KB zlib window (context takeover, the
+  # default). Fine for a few kiosks; budget for it on a large fleet.
+  compress_websocket: true
+  # Trim Lovelace resources (custom cards) per dashboard. Resources are instance-wide in HA,
+  # so every kiosk parses EVERY custom card you have installed — 21MB of JavaScript for a
+  # 4-card wall panel on the instance this was built against. Off by default.
+  #
+  # Most mistakes here are loud and easy to find: a missing card renders as "Custom element
+  # doesn't exist", a missing icon pack shows blank icons, a missing frontend patcher brings
+  # the HA header and sidebar back. Turn it on, watch one load, add whatever broke to
+  # resources_always_forward.
+  #
+  # The exception — and the only reason this is off by default — is a resource that registers
+  # no element and renders nothing but runs on load: an idle timer, a pop-up, a heartbeat.
+  # Dropping one of those is INVISIBLE; the dashboard is pixel-identical and only the
+  # behaviour stops. Read the "dropped by ALL dashboards" block in the log, which is where
+  # such a resource would appear.
+  trim_resources: false
+  # URL patterns (literal substring or /regex/) always sent, whatever the content match says.
+  # Needed for global plugins that patch the frontend rather than registering a card — they
+  # contain none of the dashboard's card names, so the match cannot see that they are used.
+  resources_always_forward: []
+  # URL patterns never sent to any dashboard. Wins over always.
+  resources_never_forward: []
   port: 8099
   ha_base: ""
   allow_ws_url: ""
@@ -43,6 +75,13 @@ schema:
   never_forward:
     - str
   strip_entities: bool
+  trim_registries: bool
+  compress_websocket: bool
+  trim_resources: bool
+  resources_always_forward:
+    - str
+  resources_never_forward:
+    - str
   port: "int(1,65535)?"
   ha_base: "str?"
   allow_ws_url: "str?"

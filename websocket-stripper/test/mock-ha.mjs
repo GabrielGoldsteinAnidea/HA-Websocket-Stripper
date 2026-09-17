@@ -5,7 +5,7 @@
 import http from 'node:http';
 import net from 'node:net';
 import { WebSocketServer, WebSocket } from 'ws';
-import { STATES, DASH_TEST, DASH_AUTO, AREAS, DEVICES, ENTITY_REGISTRY, LABELS } from './fixtures.mjs';
+import { STATES, DASH_TEST, DASH_AUTO, AREAS, DEVICES, ENTITY_REGISTRY, ENTITY_REGISTRY_DISPLAY, LABELS } from './fixtures.mjs';
 
 export function getFreePort() {
   return new Promise((res, rej) => {
@@ -22,16 +22,42 @@ const DEFAULT_CONFIGS = { 'test-dash': DASH_TEST, 'auto-dash': DASH_AUTO };
 // render_template bodies, keyed by the template source the config asks for.
 const DEFAULT_TEMPLATES = { PV_TEMPLATE: "[{'entity': 'sensor.pv_roof_power'}, {'entity': 'sensor.pv_shed_power'}]" };
 
+// The mock's HTTP handler answers 'MOCK_HA_BODY <url>', so a resource whose URL contains a
+// card type behaves like a bundle that defines it — which is what the content match tests.
+const DEFAULT_RESOURCES = [
+  { id: 'r1', type: 'module', url: '/res/my-fancy-card.js' },
+  { id: 'r2', type: 'module', url: '/res/unrelated-widget.js' },
+  { id: 'r3', type: 'module', url: '/res/global-patcher.js' },
+  // Body contains the bare letters "cbi" but never "cbi:" — the shape that made a
+  // 3-character icon namespace keep megabytes of unrelated bundles.
+  { id: 'r4', type: 'module', url: '/res/cbi-lookalike.js' },
+  // Body contains a real "cbi:" icon reference.
+  { id: 'r5', type: 'module', url: '/res/icon-pack.js' },
+  // A provider: registers the namespace as a key and never writes the colon form.
+  { id: 'r7', type: 'module', url: '/res/provider.js' },
+  // Never contains the literal element name, only its fragments — a bundle that builds
+  // `ha-bambulab-print_status-card` at runtime.
+  { id: 'r6', type: 'module', url: '/res/bambulab-print_status-cards.js' },
+];
+
+// Bodies for resources whose content matters. An icon PACK registers its namespace as a
+// key and never writes `cbi:` anywhere, so matching only the colon form would drop it.
+const DEFAULT_RESOURCE_BODIES = {
+  '/res/provider.js': 'window.customIconsets["cbi"]={getIcon:n=>n};',
+  '/res/icon-pack.js': 'const sample="cbi:bulb";',
+};
+
 const DEFAULT_REGISTRIES = {
   'config/area_registry/list': AREAS,
   'config/device_registry/list': DEVICES,
   'config/entity_registry/list': ENTITY_REGISTRY,
+  'config/entity_registry/list_for_display': ENTITY_REGISTRY_DISPLAY,
   'config/label_registry/list': LABELS,
 };
 
 // `port` pins the listen port so a test can take HA down and bring it back on the same
 // address — i.e. simulate an HA restart under a running proxy.
-export async function startMockHa({ configs = DEFAULT_CONFIGS, states = STATES, registries = DEFAULT_REGISTRIES, templates = DEFAULT_TEMPLATES, port: fixedPort } = {}) {
+export async function startMockHa({ configs = DEFAULT_CONFIGS, states = STATES, registries = DEFAULT_REGISTRIES, templates = DEFAULT_TEMPLATES, resources = DEFAULT_RESOURCES, resourceBodies = DEFAULT_RESOURCE_BODIES, port: fixedPort } = {}) {
   const port = fixedPort ?? await getFreePort();
   configs = { ...configs };    // per-mock copy, so a setConfig() in one test can't leak into the next
   const state = {
@@ -51,6 +77,13 @@ export async function startMockHa({ configs = DEFAULT_CONFIGS, states = STATES, 
     state.lastXFF = req.headers['x-forwarded-for'] ?? null;
     state.httpHits.push({ url: req.url, xff: state.lastXFF });
     res.setHeader('x-echo-xff', state.lastXFF ?? '');
+    // A resource with an explicit body, for tests that need real content rather than the
+    // echoed URL — quotes and colons do not survive a round trip through a URL.
+    const path = req.url.split('?')[0];
+    if (Object.prototype.hasOwnProperty.call(resourceBodies, path)) {
+      res.writeHead(200, { 'content-type': 'application/javascript' });
+      return res.end(resourceBodies[path]);
+    }
     res.writeHead(200, { 'content-type': 'text/plain' });
     res.end('MOCK_HA_BODY ' + req.url);
   });
@@ -90,6 +123,7 @@ export async function startMockHa({ configs = DEFAULT_CONFIGS, states = STATES, 
       if (m.type in registries) return ok(registries[m.type]);   // config/*_registry/list
       switch (m.type) {
         case 'get_states': return ok(states);
+        case 'lovelace/resources': return ok(resources);
         case 'lovelace/config': {
           const cfg = configs[m.url_path];
           if (!cfg) return ws.send(JSON.stringify({ id: m.id, type: 'result', success: false, error: { code: 'not_found', message: m.url_path } }));

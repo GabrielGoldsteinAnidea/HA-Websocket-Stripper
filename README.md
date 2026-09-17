@@ -34,12 +34,19 @@ and themes; the page just stops downloading and tracking thousands of irrelevant
 
 ## How it works
 
-The proxy passes all HTTP straight through to HA (frontend bundles, auth, registries,
-lovelace config, custom-card resources — untouched). It intercepts only `/api/websocket`:
+The proxy passes all HTTP straight through to HA (frontend bundles, auth, custom-card
+files, lovelace config). It intercepts only `/api/websocket`, where it:
 
-- rewrites `subscribe_entities` (no filter) to include `entity_ids = <allowlist>`, so HA
-  streams only those entities;
-- filters the `get_states` response to the allowlist.
+- rewrites `subscribe_entities` (no filter) to `entity_ids = <allowlist>`, so HA streams
+  only those entities;
+- filters the `get_states` response to the allowlist;
+- trims the **entity, device and area registries** to what the connection can see —
+  including `config/entity_registry/list_for_display`, which on a large instance is the
+  single biggest payload the frontend fetches;
+- optionally trims the **Lovelace resource list**, so a dashboard is sent only the custom
+  cards it actually renders instead of every card installed (off by default);
+- **compresses** the websocket, which Home Assistant's own does and the `ws` library
+  does not do by default.
 
 Everything else passes through unchanged, so the real frontend renders normally.
 
@@ -86,7 +93,12 @@ own.
    always_forward: []          # e.g. ["/^sun\\./", "person.alex"]
    never_forward: []           # e.g. ["/_battery$/"]
    strip_entities: true
+   trim_registries: true       # also cut the entity/device/area registries
+   compress_websocket: true    # leave on: HA's own websocket compresses too
+   trim_resources: false       # off by default — see DOCS.md before enabling
    ```
+   Every option has a name and description in the **Configuration** tab, so you can read
+   what each does without leaving Home Assistant.
 3. Start it. Browse `http://<ha-host>:8099/<your-dashboard>`. Point your kiosk browser
    there. To move it off `8099` (e.g. it collides with Zigbee2MQTT), set the `port` option
    — because the add-on runs `host_network: true`, the **Network** tab can't remap it.
@@ -201,7 +213,10 @@ Set `STRIP_ENTITIES=0` to passthrough untrimmed for an A/B load comparison.
 ## Notes
 
 - The frontend JS bundles still load (and are cached after first visit); this targets the
-  per-load entity firehose, which is the part that scales with instance size.
+  per-load entity firehose, which is the part that scales with instance size. Custom-card
+  bundles can additionally be trimmed per dashboard with `trim_resources`, which is off by
+  default — read the tuning section in `DOCS.md` first, because a wrongly dropped resource
+  can fail *silently*.
 - The allowlist **recomputes live** on dashboard edits and registry changes, and open kiosk
   pages reconnect themselves when it grows. Adding a whole new dashboard to the `dashboards`
   option still needs an add-on restart (options are read at boot).
