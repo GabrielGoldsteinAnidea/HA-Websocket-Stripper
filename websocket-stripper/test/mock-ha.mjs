@@ -5,7 +5,7 @@
 import http from 'node:http';
 import net from 'node:net';
 import { WebSocketServer, WebSocket } from 'ws';
-import { STATES, DASH_TEST, DASH_AUTO, AREAS, DEVICES, ENTITY_REGISTRY, LABELS } from './fixtures.mjs';
+import { STATES, DASH_TEST, DASH_AUTO, AREAS, DEVICES, ENTITY_REGISTRY, ENTITY_REGISTRY_DISPLAY, LABELS } from './fixtures.mjs';
 
 export function getFreePort() {
   return new Promise((res, rej) => {
@@ -26,6 +26,7 @@ const DEFAULT_REGISTRIES = {
   'config/area_registry/list': AREAS,
   'config/device_registry/list': DEVICES,
   'config/entity_registry/list': ENTITY_REGISTRY,
+  'config/entity_registry/list_for_display': ENTITY_REGISTRY_DISPLAY,
   'config/label_registry/list': LABELS,
 };
 

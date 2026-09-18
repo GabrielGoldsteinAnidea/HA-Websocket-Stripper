@@ -12,6 +12,8 @@ uses, so kiosk/wall-panel pages load fast on large instances — with no loss of
 | `always_forward` | list | Entities to forward even if no listed dashboard uses them. Each item is a literal `entity_id` or a `/regex/` (matched against all entities). |
 | `never_forward` | list | Entities to never forward. Applied last — **wins** over `always_forward` and dashboard detection. Literal or `/regex/`. |
 | `strip_entities` | bool | `true` (default) strips the websocket to the allowlist. `false` = full passthrough (for A/B comparison). |
+| `trim_registries` | bool | `true` (default) also trims the entity/device/area registries to what the connection can see, **including `config/entity_registry/list_for_display`**, which is typically the single largest payload the frontend fetches (1.44MB of a 2.46MB load on a 9,553-entity instance). Once states are trimmed this is the largest remaining payload on a big instance — it is one row per entity for the *whole* install. Devices and areas are kept wherever a surviving entity still reaches them, so names and area assignments keep resolving. Turn this **off first** if names, areas or device links render oddly. |
+| `compress_websocket` | bool | `true` (default) negotiates `permessage-deflate` with the browser, as Home Assistant's own websocket does. The `ws` library does not enable this server-side by default, so without it this add-on *removes* compression HA would otherwise have provided and kiosks receive plaintext JSON. Deflate runs on libuv's threadpool, not the main loop. Set `false` only on very weak hardware where the CPU costs more than the bytes saved. Memory: with context takeover on (the default), each connection holds a zlib window, about 300 KB at `windowBits` 15 — negligible for a handful of kiosks, but a 50-panel fleet holds ~15 MB in windows alone. |
 | `port` | int | Port the add-on listens on (default `8099`). Because it runs with `host_network: true`, this option is how you move it off `8099` — the **Network** tab can't remap a host-network port. Change it if `8099` collides with another add-on (e.g. Zigbee2MQTT). |
 | `ha_base` | string | Optional. Override the Home Assistant base URL the add-on proxies to (default `http://homeassistant:8123`). Set this if `host_network` is on and the internal `homeassistant` hostname doesn't resolve — e.g. `http://192.168.4.2:8123`. |
 | `allow_ws_url` | string | Optional. Override the websocket URL used once at startup to precompute the allowlist (default `ws://supervisor/core/websocket`). Set if `supervisor` doesn't resolve under `host_network` — e.g. `ws://192.168.4.2:8123/api/websocket` (also requires a token via `ALLOW_TOKEN`). |
@@ -105,8 +107,9 @@ keeps working out of the box.
 
 ## Notes & limits
 
-- Trimming only affects the **entity** stream (`get_states` / `subscribe_entities`).
-  Registries, lovelace config, translations, and the frontend JS bundles pass through.
+- Trimming affects the **entity** stream (`get_states` / `subscribe_entities`) and the
+  **entity/device/area registries** (`trim_registries`, on by default). Lovelace config,
+  custom-card resources, translations and the frontend JS bundles pass through untouched.
 - Cards referencing entities outside the allowlist will show "unavailable". The allowlist
   is computed generously (all views + template-referenced ids), but if something's
   missing add it via `always_forward`.
@@ -145,3 +148,4 @@ entities in `always_forward` and open an issue.
   the add-on starts before core is listening.
 - Navigating (via the HA sidebar) to a dashboard **not** in `dashboards` will show its
   entities as unavailable; add it to the list if you want it served too.
+

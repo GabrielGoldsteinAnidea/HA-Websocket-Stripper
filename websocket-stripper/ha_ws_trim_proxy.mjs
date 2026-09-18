@@ -58,6 +58,13 @@ const DASH_PATHS = toList(OPT.dashboards ?? (process.env.DASH_PATHS || process.e
 //   false = pass the websocket straight through (full firehose) for A/B comparison.
 const STRIP = OPT.strip_entities !== undefined ? !!OPT.strip_entities
   : (process.env.STRIP_ENTITIES ?? process.env.TRIM) !== '0';
+// HA's own websocket negotiates permessage-deflate. The `ws` library does NOT enable it
+// server-side by default, so putting this proxy in front of HA silently REMOVES compression
+// from the browser leg — a kiosk that used to receive deflated frames receives plaintext
+// JSON instead. Default on, to restore what clients had before the proxy existed; the cost
+// is deflate CPU on the HA host, which is why it can be turned off on very weak hardware.
+const COMPRESS_WS = OPT.compress_websocket !== undefined ? !!OPT.compress_websocket
+  : (process.env.COMPRESS_WS ?? '1') !== '0';
 
 // allowlist-precompute connection (add-on: supervisor proxy + SUPERVISOR_TOKEN)
 const ALLOW_WS_URL = process.env.ALLOW_WS_URL || OPT.allow_ws_url || (inAddon ? 'ws://supervisor/core/websocket' : HA_WS);
@@ -132,7 +139,21 @@ process.on('unhandledRejection', (e) => {
   process.exit(1);
 });
 
+// ALLOW is the UNION across every configured dashboard. It stays the fallback for any
+// connection we can't attribute to one dashboard, so behaviour never regresses below
+// "what this add-on did before per-dashboard trimming existed".
 let ALLOW = new Set();
+// url_path -> that dashboard's own allowlist (overrides already applied). A kiosk that only
+// ever shows one dashboard has no business receiving the other dashboards' entities: on the
+// instance this was built against the union was 388 entities while the kiosk's own dashboard
+// needed 60, so the union costs a small panel ~6x more state than it can display.
+let ALLOW_BY_DASH = new Map();
+// trim_registries: also cut the entity/device/area registries to what the connection can
+// see. Separate from strip_entities because it is the more invasive of the two — states are
+// self-describing, whereas a registry row missing here makes the frontend treat the entity as
+// unregistered. Default on; turn it off first if something renders oddly.
+const TRIM_REGISTRIES = OPT.trim_registries !== undefined ? !!OPT.trim_registries
+  : (process.env.TRIM_REGISTRIES ?? '1') !== '0';
 // Every live browser <-> HA bridge, so a grown allowlist can reach already-open pages
 // (issue #7). See refreshOpenConnections().
 const openBridges = new Set();
@@ -213,12 +234,27 @@ async function renderTemplates(cfg, renderTemplate) {
   return out;
 }
 
-// Build the union allowlist over all configured dashboards using an authed rpc().
+// Apply the always/never overrides to one dashboard's set. Done PER DASHBOARD, not just to
+// the union: `always_forward` exists for entities no card names — the Assist pipeline and
+// wake-word entities a Voice Satellite card drives, say — and those are needed on whichever
+// dashboard the kiosk actually has open, not merely somewhere in the union.
+function applyOverrides(set, realIds) {
+  const out = new Set(set);
+  ALWAYS.forEach((r) => {
+    if (r.literal) out.add(r.literal);
+    else realIds.forEach((eid) => { if (r.re.test(eid)) out.add(eid); });
+  });
+  [...out].forEach((eid) => { if (matchesAny(NEVER, eid)) out.delete(eid); });
+  return out;
+}
+
+// Build the per-dashboard allowlists (and their union) using an authed rpc().
 async function buildAllow(rpc, renderTemplate) {
   const states = await rpc({ type: 'get_states' });
   const realIds = states.map((s) => s.entity_id);
   const registries = await fetchRegistries(rpc);
   const union = new Set();
+  const perDash = new Map();
   let failed = 0;
   for (const p of DASH_PATHS) {
     try {
@@ -226,6 +262,7 @@ async function buildAllow(rpc, renderTemplate) {
       const tpls = await renderTemplates(cfg, renderTemplate);
       const set = allowlistFor(cfg, states, registries, tpls);
       log(`  ${p}: ${set.size} entities`);
+      perDash.set(p, set);
       set.forEach((e) => union.add(e));
     } catch (e) { failed++; log(`  ${p}: FAILED ${e.message}`); }
   }
@@ -242,14 +279,18 @@ async function buildAllow(rpc, renderTemplate) {
     throw new Error(`no dashboard config available yet (all ${failed} failed) — HA not ready, or none of these url_paths exist`);
   }
   const baseN = union.size;
-  ALWAYS.forEach((r) => {
-    if (r.literal) union.add(r.literal);
-    else realIds.forEach((eid) => { if (r.re.test(eid)) union.add(eid); });
-  });
-  const afterAlways = union.size;
-  [...union].forEach((eid) => { if (matchesAny(NEVER, eid)) union.delete(eid); });
-  log(`overrides: base ${baseN}, +always ${afterAlways - baseN}, -never ${afterAlways - union.size}`);
-  return union;
+  for (const [p, set] of perDash) perDash.set(p, applyOverrides(set, realIds));
+  const withOverrides = applyOverrides(union, realIds);
+  // Registry reachability is computed against the UNION deliberately: a connection served a
+  // single dashboard's entities may still legitimately name a device or area belonging to
+  // another, and a device row wrongly dropped costs a name with no bandwidth saving worth it.
+  if (TRIM_REGISTRIES) {
+    rebuildRegCache(registries, withOverrides);
+    log(`  registry reach: ${REG_CACHE.devices.size} device(s), ${REG_CACHE.areas.size} area(s)`);
+  }
+  const afterAlways = new Set([...union, ...withOverrides]).size;
+  log(`overrides: base ${baseN}, +always ${afterAlways - baseN}, -never ${afterAlways - withOverrides.size}`);
+  return { union: withOverrides, perDash };
 }
 
 // Swap in a freshly-computed allowlist and log exactly what changed — the entity ids
@@ -263,11 +304,22 @@ async function buildAllow(rpc, renderTemplate) {
 // a restart, nothing would ever rebuild it, leaving cards permanently "unavailable". Over-
 // including is harmless here by design (see allowlistFor); under-including breaks cards. An
 // actual dashboard/registry edit still replaces, so removals take effect.
-function applyAllow(next, why, { merge = false } = {}) {
-  if (merge) next = new Set([...ALLOW, ...next]);
+function applyAllow(built, why, { merge = false } = {}) {
+  let next = built.union;
+  let nextByDash = built.perDash;
+  if (merge) {
+    next = new Set([...ALLOW, ...next]);
+    // Merge per dashboard too, for the same reason the union is merged: a core that has just
+    // restarted can answer a rebuild with a partial state machine, and a dashboard that came
+    // back short would otherwise permanently lose entities nothing will rebuild.
+    const merged = new Map(ALLOW_BY_DASH);
+    for (const [p, s] of nextByDash) merged.set(p, new Set([...(ALLOW_BY_DASH.get(p) ?? []), ...s]));
+    nextByDash = merged;
+  }
   const added = [...next].filter((e) => !ALLOW.has(e)).sort();
   const removed = [...ALLOW].filter((e) => !next.has(e)).sort();
   ALLOW = next;
+  ALLOW_BY_DASH = nextByDash;
   const fmt = (a) => (a.length > 25 ? `${a.slice(0, 25).join(', ')} …(+${a.length - 25} more)` : a.join(', '));
   log(`allowlist ${why}: ${ALLOW.size} entities (+${added.length} -${removed.length})`);
   if (added.length) log(`  +added: ${fmt(added)}`);
@@ -366,7 +418,10 @@ function startController() {
           try {
             backoff = 1000; attempts = 0;
             const next = await buildAllow(rpc, renderTemplate);
-            if (!settled) { ALLOW = next; settled = true; ALLOW_READY = true; resolve(ALLOW); }
+            if (!settled) {
+              ALLOW = next.union; ALLOW_BY_DASH = next.perDash;
+              settled = true; ALLOW_READY = true; resolve(ALLOW);
+            }
             else applyAllow(next, 'recomputed (reconnect)', { merge: true });
             // lovelace_updated -> a dashboard's cards changed. The *_registry_updated
             // events -> a device moved area, a label was (un)assigned, etc., which can
@@ -541,6 +596,80 @@ proxy.on('error', (e, req, res) => {
     else if (res && typeof res.destroy === 'function') res.destroy();   // ws upgrade socket
   } catch {}
 });
+// ---- registry trimming ----
+// The frontend asks for these three registries on every load, and each is instance-wide.
+// The entity registry in particular is one row per entity — the single largest payload left
+// once states are trimmed, and the one that scales with instance size rather than with what
+// the dashboard shows.
+const REGISTRY_TYPES = new Map([
+  ['config/entity_registry/list', 'entity'],
+  ['config/entity_registry/list_for_display', 'entity_display'],
+  ['config/device_registry/list', 'device'],
+  ['config/area_registry/list', 'area'],
+]);
+
+// Trim one registry result to what `allow` can reach. Entity rows are filtered directly;
+// device and area rows are kept only when a surviving entity still points at them, so a
+// card's "Kitchen / Ceiling Light" secondary text keeps resolving. Rows we don't understand
+// are kept — over-including is harmless, under-including breaks names.
+function trimRegistry(kind, rows, allow) {
+  // `list_for_display` is NOT a list. It answers with an object — `{entity_categories,
+  // entities}` — whose rows use two-letter keys (`ei` entity_id, `di` device_id, `ai`
+  // area_id, `en` name, `pl` platform...). Measured on a 9,553-entity instance it is
+  // 1.44MB, and it was the single largest thing the kiosk still downloaded: 58% of the
+  // whole websocket load, because the array-shaped guard below passed it straight through.
+  // Filter `entities` and leave `entity_categories` (a tiny id->name map) alone.
+  if (kind === 'entity_display') {
+    const list = rows?.entities;
+    if (!Array.isArray(list) || !list.every((r) => r && typeof r === 'object' && 'ei' in r)) return rows;
+    return { ...rows, entities: list.filter((r) => allow.has(r.ei)) };
+  }
+  if (kind === 'entity') {
+    // Rows we don't understand are kept: over-including is harmless, under-including
+    // breaks names.
+    if (!Array.isArray(rows) || !rows.every((r) => r && typeof r === 'object' && 'entity_id' in r)) return rows;
+    return rows.filter((r) => allow.has(r.entity_id));
+  }
+  if (!Array.isArray(rows)) return rows;
+  // Devices and areas are kept only where a surviving entity still reaches them, so a tile's
+  // "Kitchen — Ceiling Light" secondary text still resolves. The reachable sets come from
+  // REG_CACHE, built alongside the allowlist; if it's empty we haven't got a registry yet and
+  // pass everything through rather than blanking names.
+  const keep = kind === 'device' ? REG_CACHE.devices : REG_CACHE.areas;
+  if (!keep.size) return rows;
+  const idOf = (r) => (kind === 'device' ? r?.id : (r?.area_id ?? r?.id));
+  return rows.filter((r) => keep.has(idOf(r)));
+}
+
+// Which devices/areas the current allowlist still reaches. Built from the control
+// connection's own registry fetch, so a browser asking for devices before entities still
+// gets a correct answer. Areas come from the entities directly AND from the devices those
+// entities belong to, because an entity with no area_id of its own inherits its device's.
+const REG_CACHE = { devices: new Set(), areas: new Set() };
+function rebuildRegCache(registries, allow) {
+  const devices = new Set();
+  const areas = new Set();
+  for (const r of registries?.entities ?? []) {
+    if (!allow.has(r.entity_id)) continue;
+    if (r.device_id) devices.add(r.device_id);
+    if (r.area_id) areas.add(r.area_id);
+  }
+  for (const d of registries?.devices ?? []) {
+    if (devices.has(d.id) && d.area_id) areas.add(d.area_id);
+  }
+  REG_CACHE.devices = devices;
+  REG_CACHE.areas = areas;
+}
+
+// NOTE: there is deliberately NO per-connection dashboard attribution here.
+// An earlier version of this branch inferred it from the page GET preceding the
+// websocket, keyed by client IP. That is a heuristic — it breaks behind NAT, and a
+// client fetching a dashboard's config is not necessarily displaying it. PR #13
+// resolves the user from the `auth` frame the client actually presents, which is
+// strictly better, so this branch no longer competes with it. Everything below
+// trims to whatever allowlist the connection ends up with, so it narrows on its
+// own once per-connection scoping lands.
+
 const server = http.createServer((req, res) => proxy.web(req, res));
 
 // ---- websocket upgrades ----
@@ -548,7 +677,14 @@ const server = http.createServer((req, res) => proxy.web(req, res));
 // upgrade passes straight through to HA — notably /api/webrtc/ws (go2rtc / WebRTC & MSE
 // camera-stream signaling) and Assist-pipeline sockets. Destroying them (the old default
 // branch) broke camera streams with ws close code 1006.
-const wss = new WebSocketServer({ noServer: true });
+// threshold: don't spend CPU deflating small control chatter; the payloads that matter
+// (get_states, registries, get_services) are hundreds of KB and compress roughly 10x.
+// concurrencyLimit caps simultaneous zlib jobs so a burst of kiosks reconnecting at once
+// cannot saturate the host. Deflate runs on libuv's threadpool, not the main loop.
+const wss = new WebSocketServer({
+  noServer: true,
+  perMessageDeflate: COMPRESS_WS ? { threshold: 1024, concurrencyLimit: 10 } : false,
+});
 server.on('upgrade', (req, socket, head) => {
   // A raw upgrade socket arrives with NO 'error' listener, and http-proxy only attaches one
   // once HA has answered 101 (see ws-incoming.js). Anything that errors in that window — an
@@ -584,10 +720,14 @@ server.on('upgrade', (req, socket, head) => {
   }
 });
 
-function bridge(browserWs) {
+// `allow` is THIS connection's allowlist — one dashboard's, or the union when the client
+// couldn't be attributed. Captured per bridge rather than read from the global, so two
+// kiosks on different dashboards get genuinely different subscriptions.
+function bridge(browserWs, allow = ALLOW) {
   const haWs = new WebSocket(HA_WS, { perMessageDeflate: true, maxPayload: 0 });
   const getStatesIds = new Set();
   const subEntityIds = new Set();   // subscribe_entities subs we injected the allowlist into
+  const registryIds = new Map();    // request id -> which registry, to trim its result
   const queue = []; let haOpen = false;
   const toHA = (s) => { if (haOpen) haWs.send(s); else queue.push(s); };
 
@@ -597,18 +737,33 @@ function bridge(browserWs) {
     let s = raw.toString(); let m;
     try { m = JSON.parse(s); } catch { return toHA(s); }
     if (STRIP && m && m.type === 'get_states') getStatesIds.add(m.id);
+    if (STRIP && TRIM_REGISTRIES && m && REGISTRY_TYPES.has(m.type)) registryIds.set(m.id, REGISTRY_TYPES.get(m.type));
     if (STRIP && m && m.type === 'subscribe_entities' && !m.entity_ids) {
       // Belt-and-braces to the upgrade gate: an empty entity_ids is NOT "subscribe to
       // nothing", it's "no filter" (HA: `set(msg["entity_ids"]) or None`). Sending one would
       // invert the add-on's entire purpose, so drop the connection instead.
-      if (!ALLOW.size) {
+      if (!allow.size) {
         logThrottled('empty-allow', 'ERROR: refusing subscribe_entities — the allowlist is empty, and forwarding that would stream EVERY entity. Check the `dashboards` option.');
         return close();
       }
-      m.entity_ids = [...ALLOW];           // HA now streams only the allowlist
+      m.entity_ids = [...allow];           // HA now streams only this connection's allowlist
       subEntityIds.add(m.id);              // remember it, to defensively re-filter its events
       s = JSON.stringify(m);
     }
+    // NB: `lovelace/config` is deliberately NOT used to re-attribute a live connection.
+    //
+    // It looks like the perfect signal — the frontend naming the dashboard it is about to
+    // render — but a client fetching a dashboard's config does not mean it is DISPLAYING
+    // that dashboard. Kiosk Satellite, for one, enumerates every dashboard's views at
+    // startup, so a panel showing `basement-stairs-panel` requests the config of all five.
+    // Acting on that flipped the stored hint to whichever dashboard was enumerated last and
+    // recycled the socket to "follow" it, which produced a reconnect storm and then served
+    // the panel the wrong dashboard's allowlist. Observed live, 2026-09-11.
+    //
+    // The page GET that precedes the websocket is the only signal that actually means "this
+    // client is displaying this dashboard", so it is the only one used. The cost is that a
+    // client-side navigation to a DIFFERENT dashboard keeps the old allowlist until the page
+    // reloads; set `per_dashboard: false` if that matters more than the trimming does.
     if (m && m.type === 'unsubscribe_events' && m.subscription != null) subEntityIds.delete(m.subscription);
     toHA(s);
   });
@@ -618,10 +773,30 @@ function bridge(browserWs) {
     try { m = JSON.parse(s); } catch { return safeSend(s); }
     if (STRIP && m && m.type === 'result' && getStatesIds.has(m.id) && Array.isArray(m.result)) {
       const before = m.result.length;
-      m.result = m.result.filter((e) => ALLOW.has(e.entity_id));
+      m.result = m.result.filter((e) => allow.has(e.entity_id));
       getStatesIds.delete(m.id);
       s = JSON.stringify(m);
       log(`get_states trimmed ${before} -> ${m.result.length}`);
+    }
+    // Registry trimming. The entity registry is one row per entity for the WHOLE instance —
+    // on a 9,553-entity install that is megabytes of JSON the kiosk parses on every load,
+    // dwarfing the states we just trimmed to a few hundred. Cut it to the entities this
+    // connection can actually see, plus the devices/areas those rows still reference so
+    // names and area assignments keep resolving.
+    // Note the guard is on `m.result` being an object of ANY shape, not on it being an
+    // array: `list_for_display` answers with `{entity_categories, entities}`, and an
+    // Array.isArray() guard here silently skipped the largest payload of the lot.
+    if (STRIP && TRIM_REGISTRIES && m && m.type === 'result' && registryIds.has(m.id) && m.result && typeof m.result === 'object') {
+      const kind = registryIds.get(m.id);
+      registryIds.delete(m.id);
+      const rowsOf = (r) => (Array.isArray(r) ? r.length : (Array.isArray(r?.entities) ? r.entities.length : -1));
+      const before = rowsOf(m.result);
+      m.result = trimRegistry(kind, m.result, allow);
+      const after = rowsOf(m.result);
+      if (after !== before) {
+        s = JSON.stringify(m);
+        logThrottled(`reg:${kind}`, `${kind} registry trimmed ${before} -> ${after}`);
+      }
     }
     // Defensive egress filter (belt-and-suspenders): HA already trims to the injected
     // entity_ids, so this is normally a no-op. But if a future HA ever ignored that
@@ -633,12 +808,12 @@ function bridge(browserWs) {
       const ev = m.event; let changed = false;
       for (const k of ['a', 'c']) {
         if (ev[k]) for (const eid of Object.keys(ev[k])) {
-          if (!ALLOW.has(eid)) { delete ev[k][eid]; changed = true; }
+          if (!allow.has(eid)) { delete ev[k][eid]; changed = true; }
         }
       }
       if (Array.isArray(ev.r)) {
         const before = ev.r.length;
-        ev.r = ev.r.filter((eid) => ALLOW.has(eid));
+        ev.r = ev.r.filter((eid) => allow.has(eid));
         if (ev.r.length !== before) changed = true;
       }
       if (changed) s = JSON.stringify(m);
@@ -657,6 +832,7 @@ function bridge(browserWs) {
 // ---- boot ----
 log(`ha-ws-trim-proxy v${VERSION} starting`);
 log(`mode: ${inAddon ? 'add-on' : 'dev'} | target ${HA_BASE} | allowlist via ${ALLOW_WS_URL}`);
+log(`options: trim_registries=${TRIM_REGISTRIES} compress_websocket=${COMPRESS_WS}`);
 // Listen FIRST, before HA is known to be reachable. The add-on and HA core restart together
 // (host boot, a core update), and core can take minutes to answer — the proxy's job is to
 // wait for it, not to exit. HTTP proxies through immediately (502 while HA is down, like any

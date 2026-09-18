@@ -56,6 +56,21 @@ export const REGISTRIES = {
   areas: AREAS, labels: LABELS, devices: DEVICES, entities: ENTITY_REGISTRY,
 };
 
+// `config/entity_registry/list_for_display` is NOT a list — HA answers with an object, and
+// the rows use two-letter keys. Shape captured from HA on a live instance:
+//   {"entity_categories":{"0":"config","1":"diagnostic"},
+//    "entities":[{"ei":"person.x","pl":"person","lb":[],"en":"X","di":..,"ai":..,"ec":..}]}
+// It matters because it is the biggest single payload the frontend fetches (1.44MB for
+// 9,533 entities on the instance this was built against).
+export const ENTITY_REGISTRY_DISPLAY = {
+  entity_categories: { 0: 'config', 1: 'diagnostic' },
+  entities: ENTITY_REGISTRY.map((e) => ({
+    ei: e.entity_id, pl: e.platform, lb: e.labels,
+    ...(e.device_id ? { di: e.device_id } : {}),
+    ...(e.area_id ? { ai: e.area_id } : {}),
+  })),
+};
+
 // "test-dash": explicit cards + a picture card + a button-card whose template only
 // references switch.fan in TEXT (structural walk can't see it — proves the text-scan pass).
 export const DASH_TEST = {

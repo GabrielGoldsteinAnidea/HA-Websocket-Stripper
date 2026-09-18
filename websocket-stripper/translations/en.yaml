@@ -1,0 +1,57 @@
+configuration:
+  dashboards:
+    name: Dashboards to serve
+    description: >-
+      The url_path of each dashboard this add-on should serve, from Settings → Dashboards
+      (e.g. kitchen-kiosk). Only these are trimmed; anything not listed is served whole.
+      Leave empty and the add-on refuses websockets rather than relaying the full firehose.
+  always_forward:
+    name: Always forward these entities
+    description: >-
+      Entities to forward even when no dashboard references them. A literal entity_id, or
+      a /regex/. Needed for anything your cards don't name — Assist pipeline and wake-word
+      entities behind a Voice Satellite card, and any entity that panel-side JavaScript
+      READS. JavaScript that only writes an entity does not need this, because callService
+      resolves on the server.
+  never_forward:
+    name: Never forward these entities
+    description: >-
+      Entities to withhold even when a dashboard does reference them. Literal or /regex/.
+      Applied last, so it overrides both dashboard detection and the always list.
+  strip_entities:
+    name: Strip the entity websocket
+    description: >-
+      The core feature. Off turns the add-on into a plain pass-through proxy, which is
+      useful for an A/B comparison when you want to measure what the trimming is worth.
+  trim_registries:
+    name: Trim the entity, device and area registries
+    description: >-
+      Cuts the registries to what the connection can actually see. On a large instance
+      these are the biggest payload left once states are trimmed — one row per entity for
+      the whole install, including the list_for_display variant. Turn this off first if
+      names, areas or device links start rendering oddly.
+  compress_websocket:
+    name: Compress the websocket
+    description: >-
+      Negotiates permessage-deflate with the browser, which Home Assistant's own websocket
+      does. Leave this on: without it the add-on removes compression that HA would
+      otherwise have provided. Only worth turning off on very weak hardware, where the
+      compression CPU costs more than the bytes it saves.
+  port:
+    name: Listen port
+    description: >-
+      The port the add-on serves on (default 8099). Because it runs with host networking,
+      this option is the only way to move it — the Network tab cannot remap a host-network
+      port. Change it if something else already uses 8099.
+  ha_base:
+    name: Home Assistant URL (advanced)
+    description: >-
+      Override the Home Assistant address the add-on proxies to. Only needed when the
+      internal hostname does not resolve under host networking — then set something like
+      http://192.168.1.10:8123.
+  allow_ws_url:
+    name: Allowlist websocket URL (advanced)
+    description: >-
+      Override the websocket used once at startup to work out each dashboard's entities.
+      Only needed when the supervisor hostname does not resolve; requires a token via
+      ALLOW_TOKEN.
