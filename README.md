@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.png" alt="WebSocket Stripper — not the whole house" width="640">
+</p>
+
 # HA WebSocket Stripper — make slow Home Assistant dashboards load fast
 
 > **Speed up slow-loading Home Assistant dashboards on large instances.** A lightweight
