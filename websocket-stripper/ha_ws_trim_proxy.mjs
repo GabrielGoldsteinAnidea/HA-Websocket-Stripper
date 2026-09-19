@@ -588,6 +588,11 @@ function bridge(browserWs) {
   const haWs = new WebSocket(HA_WS, { perMessageDeflate: true, maxPayload: 0 });
   const getStatesIds = new Set();
   const subEntityIds = new Set();   // subscribe_entities subs we injected the allowlist into
+  // subscribe_events subscriptions that deliver state_changed. These bypass the allowlist
+  // entirely: the egress filter below only ever matched subscribe_entities, so a client using
+  // the older subscribe_events path receives EVERY state change on the instance — the whole
+  // firehose, through the add-on built to prevent it.
+  const stateChangedSubs = new Set();
   const queue = []; let haOpen = false;
   const toHA = (s) => { if (haOpen) haWs.send(s); else queue.push(s); };
 
@@ -597,6 +602,9 @@ function bridge(browserWs) {
     let s = raw.toString(); let m;
     try { m = JSON.parse(s); } catch { return toHA(s); }
     if (STRIP && m && m.type === 'get_states') getStatesIds.add(m.id);
+    // No event_type means "every event", which includes state_changed.
+    if (STRIP && m && m.type === 'subscribe_events'
+        && (!m.event_type || m.event_type === 'state_changed')) stateChangedSubs.add(m.id);
     if (STRIP && m && m.type === 'subscribe_entities' && !m.entity_ids) {
       // Belt-and-braces to the upgrade gate: an empty entity_ids is NOT "subscribe to
       // nothing", it's "no filter" (HA: `set(msg["entity_ids"]) or None`). Sending one would
@@ -609,13 +617,37 @@ function bridge(browserWs) {
       subEntityIds.add(m.id);              // remember it, to defensively re-filter its events
       s = JSON.stringify(m);
     }
-    if (m && m.type === 'unsubscribe_events' && m.subscription != null) subEntityIds.delete(m.subscription);
+    if (m && m.type === 'unsubscribe_events' && m.subscription != null) {
+      subEntityIds.delete(m.subscription);
+      stateChangedSubs.delete(m.subscription);
+    }
     toHA(s);
   });
 
   haWs.on('message', (raw) => {
     let s = raw.toString(); let m;
     try { m = JSON.parse(s); } catch { return safeSend(s); }
+
+    // Home Assistant BATCHES messages into a JSON array. Every `m.type` check below sees
+    // undefined on those, so a batched frame falls through all of them untouched — which is
+    // how an unfiltered firehose goes unnoticed. Filter the array element by element.
+    const dropStateChanged = (x) => STRIP
+      && x && x.type === 'event'
+      && stateChangedSubs.has(x.id)
+      && typeof x.event?.data?.entity_id === 'string'
+      && !ALLOW.has(x.event.data.entity_id);
+
+    if (Array.isArray(m)) {
+      const before = m.length;
+      const kept = m.filter((x) => !dropStateChanged(x));
+      if (!kept.length) return;                        // nothing survived: forward nothing
+      if (kept.length !== before) {
+        logThrottled('batch-trim', `batched state_changed trimmed ${before} -> ${kept.length} per frame`);
+        return safeSend(JSON.stringify(kept));
+      }
+      return safeSend(s);
+    }
+    if (dropStateChanged(m)) return;
     if (STRIP && m && m.type === 'result' && getStatesIds.has(m.id) && Array.isArray(m.result)) {
       const before = m.result.length;
       m.result = m.result.filter((e) => ALLOW.has(e.entity_id));
