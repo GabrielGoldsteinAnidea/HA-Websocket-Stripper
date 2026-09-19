@@ -58,6 +58,13 @@ const DASH_PATHS = toList(OPT.dashboards ?? (process.env.DASH_PATHS || process.e
 //   false = pass the websocket straight through (full firehose) for A/B comparison.
 const STRIP = OPT.strip_entities !== undefined ? !!OPT.strip_entities
   : (process.env.STRIP_ENTITIES ?? process.env.TRIM) !== '0';
+// HA's own websocket negotiates permessage-deflate. The `ws` library does NOT enable it
+// server-side by default, so putting this proxy in front of HA silently REMOVES compression
+// from the browser leg — a kiosk that used to receive deflated frames receives plaintext
+// JSON instead. Default on, to restore what clients had before the proxy existed; the cost
+// is deflate CPU on the HA host, which is why it can be turned off on very weak hardware.
+const COMPRESS_WS = OPT.compress_websocket !== undefined ? !!OPT.compress_websocket
+  : (process.env.COMPRESS_WS ?? '1') !== '0';
 
 // allowlist-precompute connection (add-on: supervisor proxy + SUPERVISOR_TOKEN)
 const ALLOW_WS_URL = process.env.ALLOW_WS_URL || OPT.allow_ws_url || (inAddon ? 'ws://supervisor/core/websocket' : HA_WS);
@@ -548,7 +555,14 @@ const server = http.createServer((req, res) => proxy.web(req, res));
 // upgrade passes straight through to HA — notably /api/webrtc/ws (go2rtc / WebRTC & MSE
 // camera-stream signaling) and Assist-pipeline sockets. Destroying them (the old default
 // branch) broke camera streams with ws close code 1006.
-const wss = new WebSocketServer({ noServer: true });
+// threshold: don't spend CPU deflating small control chatter; the payloads that matter
+// (get_states, registries, get_services) are hundreds of KB and compress roughly 10x.
+// concurrencyLimit caps simultaneous zlib jobs so a burst of kiosks reconnecting at once
+// cannot saturate the host. Deflate runs on libuv's threadpool, not the main loop.
+const wss = new WebSocketServer({
+  noServer: true,
+  perMessageDeflate: COMPRESS_WS ? { threshold: 1024, concurrencyLimit: 10 } : false,
+});
 server.on('upgrade', (req, socket, head) => {
   // A raw upgrade socket arrives with NO 'error' listener, and http-proxy only attaches one
   // once HA has answered 101 (see ws-incoming.js). Anything that errors in that window — an
