@@ -27,7 +27,7 @@
 
 import http from 'node:http';
 import fs from 'node:fs';
-import httpProxy from 'http-proxy';
+import { createProxyServer } from 'httpxy';
 import { WebSocketServer, WebSocket } from 'ws';
 import { extractEntities, collectTemplates, expandGroupMembers } from './lovelace_extract.mjs';
 
@@ -107,7 +107,7 @@ function logThrottled(key, msg) {
 
 // Last-resort safety net. An HA restart resets every in-flight socket at once (camera
 // streams, Assist pipelines, the browser's own connections), and a socket that errors before
-// http-proxy has attached its handlers reaches Node as an unhandled 'error' event — which
+// the proxy library has attached its handlers reaches Node as an unhandled 'error' event — which
 // killed the whole add-on (`throw er` / `read ECONNRESET`), turning an HA reboot into a
 // crash-restart loop. Transient network errnos are logged and swallowed; anything else is a
 // real bug and still exits loudly.
@@ -434,7 +434,7 @@ function startController() {
 // autoRewrite is deliberately OFF: it rewrites a redirect's HOST but never its SCHEME, which
 // is an infinite redirect loop behind TLS termination (see rewriteLocation below). We do the
 // whole job in a proxyRes handler instead — same condition, plus scheme and query params.
-const proxy = httpProxy.createProxyServer({ target: HA_BASE, changeOrigin: true, ws: false, xfwd: true });
+const proxy = createProxyServer({ target: HA_BASE, changeOrigin: true, ws: false, xfwd: true });
 
 // The origin as the BROWSER sees it, which is not necessarily the one we were reached on.
 // Note xfwd APPENDS our own hop to x-forwarded-proto (so Caddy's "https" becomes
@@ -514,16 +514,62 @@ proxy.on('proxyRes', (proxyRes, req) => {
 //
 // Normalize IN PLACE, preserving the chain. This used to `setHeader('x-forwarded-for', ip)`,
 // replacing the whole chain with our immediate peer — which broke every setup with another
-// reverse proxy in front (issue #9). http-proxy's xfwd APPENDS our hop to all three headers,
-// so behind e.g. Caddy HA received:
-//     X-Forwarded-For:   <client>,<caddy>      (2 entries — then flattened by us to 1)
+// reverse proxy in front (issue #9). Behind e.g. Caddy, HA received:
+//     X-Forwarded-For:   <client>              (a 2-entry chain, flattened by us to 1)
 //     X-Forwarded-Proto: https,http            (2 entries)
 // and HA's forwarded middleware raises HTTPBadRequest on
 //     `len(forwarded_proto) not in (1, len(forwarded_for))`
-// -> a hard 400 on every request. Keeping the chain intact keeps the counts in step, and
-// preserves the real client IP through the upstream proxy instead of hiding it behind Caddy.
+// -> a hard 400 on every request. What HA actually enforces is that the For and Proto chains
+// agree in LENGTH, so the fix is to leave the chain intact and only normalize its entries.
+// That also preserves the real client IP through the upstream proxy instead of hiding it
+// behind Caddy.
+//
+// The two proxy libraries differ here, and both satisfy the rule: node-http-proxy APPENDED
+// our hop to all three headers, while httpxy sets each only when ABSENT. Either way For and
+// Proto stay in step. httpxy's behaviour additionally leaves us transparent to whatever the
+// edge proxy set, so HA sees exactly Caddy's chain rather than an extra hop it may not have
+// listed in `trusted_proxies`.
 const normalizeXff = (v) => String(v).split(',').map((s) => s.trim().replace(/^::ffff:/, '')).filter(Boolean).join(', ');
+// What the CLIENT sent, captured at the front door. httpxy's HTTP path sets each
+// x-forwarded-* header only when absent, so by the time `proxyReq` fires the header is
+// always present and nothing says who wrote it. (Its ws() path appends our hop itself.)
+const XFF_IN = Symbol('x-forwarded-for as received');
+const XFP_IN = Symbol('x-forwarded-proto as received');
+const captureForwarded = (req) => {
+  req[XFF_IN] = req.headers['x-forwarded-for'] ?? null;
+  req[XFP_IN] = req.headers['x-forwarded-proto'] ?? null;
+};
+const normalizeIp = (ip) => String(ip || '').replace(/^::ffff:/, '');
+
+// Our peer goes on the RIGHT of any chain the client supplied. This is the half of #9 that
+// protects trusted_networks, and it is not the same as keeping the chain intact: HA walks
+// X-Forwarded-For from the right and takes the first address not in `trusted_proxies` as the
+// client. DOCS tell people to trust 127.0.0.1 (host networking). A LAN host that can reach the
+// proxy port and sends `X-Forwarded-For: <kiosk ip>` would, with the header merely preserved,
+// reach HA as that kiosk and log in password-less. With our peer appended HA meets the forger's
+// real address first. node-http-proxy appended by default; httpxy does not.
+//
+// Proto stays in step, or HA answers 400 (`len(proto) not in (1, len(for))`): a single scheme
+// describes the whole chain and stays single; a chain grows by one, matching For.
+function forwardedChain(req, incomingFor, incomingProto, scheme) {
+  const peer = normalizeIp(req.socket?.remoteAddress);
+  const out = {};
+  if (!incomingFor) return out;
+  const chain = normalizeXff(incomingFor);
+  out.for = peer && chain ? `${chain}, ${peer}` : (chain || peer);
+  const protos = String(incomingProto || '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (protos.length > 1) out.proto = `${protos.join(', ')}, ${scheme}`;
+  return out;
+}
+
 proxy.on('proxyReq', (proxyReq, req) => {
+  const chain = forwardedChain(req, req[XFF_IN], req[XFP_IN], req.socket?.encrypted ? 'https' : 'http');
+  if (chain.for) {
+    proxyReq.setHeader('x-forwarded-for', chain.for);
+    if (chain.proto) proxyReq.setHeader('x-forwarded-proto', chain.proto);
+    return;
+  }
+  // No chain from the client: httpxy filled in our peer, which only needs normalising.
   const xff = proxyReq.getHeader('x-forwarded-for') ?? req.headers['x-forwarded-for'];
   if (xff) proxyReq.setHeader('x-forwarded-for', normalizeXff(xff));
 });
@@ -541,7 +587,10 @@ proxy.on('error', (e, req, res) => {
     else if (res && typeof res.destroy === 'function') res.destroy();   // ws upgrade socket
   } catch {}
 });
-const server = http.createServer((req, res) => proxy.web(req, res));
+// httpxy's web()/ws() return promises. The 'error' handler above already deals with the
+// failure; without a catch here the same failure ALSO surfaces as an unhandled rejection,
+// which is a process-level crash — exactly the class of bug the socket guard exists to stop.
+const server = http.createServer((req, res) => { captureForwarded(req); proxy.web(req, res).catch(() => {}); });
 
 // ---- websocket upgrades ----
 // We intercept ONLY /api/websocket (the entity firehose) to trim it. EVERY other ws
@@ -550,7 +599,7 @@ const server = http.createServer((req, res) => proxy.web(req, res));
 // branch) broke camera streams with ws close code 1006.
 const wss = new WebSocketServer({ noServer: true });
 server.on('upgrade', (req, socket, head) => {
-  // A raw upgrade socket arrives with NO 'error' listener, and http-proxy only attaches one
+  // A raw upgrade socket arrives with NO 'error' listener, and the proxy library only attaches one
   // once HA has answered 101 (see ws-incoming.js). Anything that errors in that window — an
   // HA restart resetting an in-flight camera/Assist stream, a kiosk abandoning a retry —
   // reaches Node as an unhandled 'error' event and killed the add-on outright. Claim it
@@ -580,7 +629,11 @@ server.on('upgrade', (req, socket, head) => {
     // Keyed on the path, not req.url: camera stream URLs carry a per-request signature, so
     // keying on the whole thing would defeat the throttle (and grow the map) during a retry storm.
     logThrottled(`passthrough:${req.url.split('?')[0]}`, `ws upgrade passthrough -> HA: ${req.url}`);
-    proxy.ws(req, socket, head);
+    // Argument order changed with the library: node-http-proxy was ws(req, socket, head),
+    // httpxy is ws(req, socket, options, head). Passing `head` third spreads a Buffer into
+    // the request options and the upgrade never completes — silently, with no error, just a
+    // socket that hangs. Hence the explicit `undefined`.
+    proxy.ws(req, socket, undefined, head).catch(() => {});
   }
 });
 

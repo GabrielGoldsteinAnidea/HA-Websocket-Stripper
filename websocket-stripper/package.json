@@ -9,8 +9,11 @@
     "start": "node ha_ws_trim_proxy.mjs",
     "test": "node --test"
   },
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
-    "http-proxy": "^1.18.1",
+    "httpxy": "^0.5.5",
     "ws": "^8.18.0"
   }
 }

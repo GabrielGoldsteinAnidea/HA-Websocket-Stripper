@@ -36,6 +36,7 @@ export async function startMockHa({ configs = DEFAULT_CONFIGS, states = STATES, 
   configs = { ...configs };    // per-mock copy, so a setConfig() in one test can't leak into the next
   const state = {
     lastXFF: null,
+    lastXFProto: null,         // HA rejects a request whose For/Proto chains differ in length
     httpHits: [],
     conns: new Set(),          // { ws, eventSubs:Map<event_type,id>, entitySubIds:Set }
     lastSubscribeEntities: null,
@@ -49,8 +50,10 @@ export async function startMockHa({ configs = DEFAULT_CONFIGS, states = STATES, 
 
   const server = http.createServer((req, res) => {
     state.lastXFF = req.headers['x-forwarded-for'] ?? null;
-    state.httpHits.push({ url: req.url, xff: state.lastXFF });
+    state.lastXFProto = req.headers['x-forwarded-proto'] ?? null;
+    state.httpHits.push({ url: req.url, xff: state.lastXFF, xfproto: state.lastXFProto });
     res.setHeader('x-echo-xff', state.lastXFF ?? '');
+    res.setHeader('x-echo-xfproto', state.lastXFProto ?? '');
     res.writeHead(200, { 'content-type': 'text/plain' });
     res.end('MOCK_HA_BODY ' + req.url);
   });
@@ -134,6 +137,7 @@ export async function startMockHa({ configs = DEFAULT_CONFIGS, states = STATES, 
     state,
     lastSubscribeEntities: () => state.lastSubscribeEntities,
     lastXFF: () => state.lastXFF,
+    lastXFProto: () => state.lastXFProto,
     renderedTemplates: () => state.renderedTemplates,
     unsubscribed: () => state.unsubscribed,
     setHangTemplates(v) { state.hangTemplates = v; },
