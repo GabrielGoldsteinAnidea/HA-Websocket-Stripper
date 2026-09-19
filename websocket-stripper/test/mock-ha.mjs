@@ -81,6 +81,7 @@ export async function startMockHa({ configs = DEFAULT_CONFIGS, states = STATES, 
   function haProtocol(ws) {
     const conn = { ws, eventSubs: new Map(), entitySubIds: new Set() };
     state.conns.add(conn);
+    state.lastSocket = ws;      // so a test can push a raw batched frame at the proxy
     ws.on('close', () => state.conns.delete(conn));
     ws.send(JSON.stringify({ type: 'auth_required', ha_version: '2026.7.0' }));
     ws.on('message', (raw) => {
@@ -133,6 +134,8 @@ export async function startMockHa({ configs = DEFAULT_CONFIGS, states = STATES, 
     wsUrl: `ws://127.0.0.1:${port}/api/websocket`,
     state,
     lastSubscribeEntities: () => state.lastSubscribeEntities,
+    // Push a raw frame, used to emit a BATCHED array like Home Assistant really sends.
+    sendRaw: (str) => { try { state.lastSocket?.send(str); } catch {} },
     lastXFF: () => state.lastXFF,
     renderedTemplates: () => state.renderedTemplates,
     unsubscribed: () => state.unsubscribed,
