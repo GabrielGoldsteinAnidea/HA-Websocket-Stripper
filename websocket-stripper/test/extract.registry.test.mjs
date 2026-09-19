@@ -55,3 +55,70 @@ test('unresolvable filters (no registry) yield nothing but do not throw', () => 
   const res = extractEntities(auto({ include: [{ area: 'Living Room' }] }), STATES, { overInclude: true });
   assert.deepEqual(res.entities, []);
 });
+
+// A card configured with a DEVICE rather than with entities.
+//
+// Found on a live instance: `custom:ha-bambulab-print_status-card` carries
+// `printer: <device id>` and looks up that device's entities itself, in the browser. Nothing in
+// the card config is an entity_id, so the structural walk found none and the dashboard resolved
+// to just its two lights — the printer's 57 entities were stripped and the card rendered empty.
+// That reads as a broken card, not as a trimming problem, which is what makes it worth a test.
+const DEV = '43f1e9fddd670256ced58c9fe7971e41';
+const DEV_REGS = {
+  areas: [], labels: [],
+  devices: [{ id: DEV, name: 'H2S_0938AC572400463' }],
+  entities: [
+    { entity_id: 'sensor.printer_print_status', device_id: DEV, platform: 'bambu_lab' },
+    { entity_id: 'sensor.printer_print_progress', device_id: DEV, platform: 'bambu_lab' },
+    { entity_id: 'camera.printer_camera', device_id: DEV, platform: 'bambu_lab' },
+    { entity_id: 'light.unrelated', device_id: 'a'.repeat(32), platform: 'hue' },
+    // Disabled in the registry: HA never streams it, so a device expansion must skip it.
+    { entity_id: 'sensor.printer_disabled_diag', device_id: DEV, platform: 'bambu_lab', disabled_by: 'user' },
+  ],
+};
+const devSetOf = (cards) => new Set(
+  extractEntities(view(cards), [], { registries: DEV_REGS }).entities,
+);
+
+test('a card naming a device pulls in that device entities', () => {
+  const got = devSetOf([{ type: 'custom:ha-bambulab-print_status-card', printer: DEV, style: 'simple' }]);
+  assert.deepEqual(got, new Set([
+    'sensor.printer_print_status', 'sensor.printer_print_progress', 'camera.printer_camera',
+  ]));
+});
+
+test('the device key name is not assumed — any key holding a real device id counts', () => {
+  // `printer` here, `device` elsewhere, something else in the next card. Matching on the VALUE
+  // being a registered device is what makes this work for cards nobody has seen yet.
+  for (const key of ['printer', 'device', 'device_id', 'target_device']) {
+    assert.ok(devSetOf([{ type: 'custom:whatever', [key]: DEV }]).has('sensor.printer_print_status'),
+      `key ${key} should resolve`);
+  }
+});
+
+test('a list of device ids resolves too', () => {
+  const got = devSetOf([{ type: 'custom:multi', devices: [DEV] }]);
+  assert.ok(got.has('camera.printer_camera'));
+});
+
+test('a device id nested in a stack resolves via the normal walk', () => {
+  const got = devSetOf([{ type: 'vertical-stack', cards: [{ type: 'custom:x', printer: DEV }] }]);
+  assert.ok(got.has('sensor.printer_print_status'));
+});
+
+test('a disabled entity is not pulled in through its device', () => {
+  const got = devSetOf([{ type: 'custom:ha-bambulab-print_status-card', printer: DEV }]);
+  assert.ok(!got.has('sensor.printer_disabled_diag'), 'disabled entities can never be streamed');
+  assert.ok(got.has('sensor.printer_print_status'), 'the enabled ones still are');
+});
+
+test('a 32-hex string that is NOT a registered device adds nothing', () => {
+  // Shape alone must never be enough — it has to exist in the registry.
+  const got = devSetOf([{ type: 'custom:x', printer: 'f'.repeat(32) }]);
+  assert.deepEqual(got, new Set());
+});
+
+test('device resolution does not drag in entities of other devices', () => {
+  const got = devSetOf([{ type: 'custom:x', printer: DEV }]);
+  assert.ok(!got.has('light.unrelated'), 'only the named device expands');
+});
