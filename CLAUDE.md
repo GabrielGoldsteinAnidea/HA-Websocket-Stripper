@@ -34,6 +34,16 @@ socket to HA, and relays both ways, modifying only:
 - `subscribe_entities` with no filter → inject `entity_ids = <allowlist>` so HA streams
   only those entities (trims at the source);
 - the `get_states` **result** → filtered to the allowlist.
+- `subscribe_events` with `event_type: state_changed` (or no event_type) → events for
+  non-allowlisted entities dropped (0.2.5, #19). HA **coalesces** queued messages into a JSON
+  array frame once the client sends `supported_features`; array frames are filtered element by
+  element for this path. Known gap: the `get_states`-result trim and the `subscribe_entities`
+  re-filter still check `m.type` on the top-level frame only — a coalesced `get_states` result
+  skips the trim. Fix = one per-message transform applied to each array element (planned before
+  #13/#15 land).
+- the browser leg negotiates `permessage-deflate` (`compress_websocket`, default on, 0.2.5 #14);
+  `ws` disables it server-side by default, so before 0.2.5 the proxy *removed* compression HA
+  would have provided.
 
 Everything else (auth handshake, registry calls, config, events) passes through, so the
 real frontend renders your real cards — just without the all-entities firehose. The
@@ -56,7 +66,11 @@ Union, across all configured dashboards, of:
    templates that a structural walk can't parse.
 
 Then `+ always_forward`, then `- never_forward` (never wins), then **group members**
-(`expandGroupMembers`, transitive via `attributes.entity_id`). Over-inclusion is harmless
+(`expandGroupMembers`, transitive via `attributes.entity_id`). Members must exist in `get_states`
+(0.2.5, #12 — disabled members otherwise inflate the count by a third on Hue-heavy instances).
+Also: any string value on a card that is a **registered device id** expands to that device's
+enabled entities (`resolveDeviceIds`, 0.2.5, #20) — cards like `ha-bambulab-*` / `whisker-card`
+are configured with a device, not entities. Over-inclusion is harmless
 (still tiny vs the instance); under-inclusion makes a card show "unavailable".
 
 ### auto-entities filter resolution (`condTests` / `toMatcher`)
@@ -82,6 +96,8 @@ unsubscribes. Don't route it through `rpc()`, which resolves on `result`.
 - `websocket-stripper/ha_ws_trim_proxy.mjs` — the proxy (HTTP passthrough + ws intercept + allowlist precompute).
 - `websocket-stripper/lovelace_extract.mjs` — the card-tree entity extractor.
 - `websocket-stripper/config.yaml` / `Dockerfile` / `package.json` — HA add-on packaging.
+  Dockerfile copies the lockfile and runs `npm ci` (0.2.5, #23) — a dependency change needs
+  `npm install` locally to update `package-lock.json` or the image build fails.
 - `websocket-stripper/DOCS.md` — add-on Documentation tab (option reference).
 - `repository.yaml` — lets HA add this GitHub URL as an add-on repository.
 - `README.md` — install + dev-run.

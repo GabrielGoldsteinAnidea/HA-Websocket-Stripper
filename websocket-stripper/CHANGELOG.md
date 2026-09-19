@@ -1,17 +1,49 @@
 # Changelog
 
-## Unreleased
+## 0.2.5 — 2026-09-19
 
-**Fix: the add-on was removing websocket compression.** Home Assistant's own websocket
+Six contributor PRs, all measured on real instances (a 9,5xx-entity NSPanel install and a
+49-tablet fleet). Thanks @davidcoulson and @ajguerre1.
+
+**The add-on was removing websocket compression** (#14). Home Assistant's own websocket
 negotiates `permessage-deflate`, but the `ws` library does not enable it server-side by
 default — so putting this proxy in front of HA silently downgraded every kiosk from deflated
-frames to plaintext JSON. Confirmed by comparing the negotiated `Sec-WebSocket-Extensions` on
-HA directly (`permessage-deflate`) against the proxy (nothing).
+frames to plaintext JSON (verified: `Sec-WebSocket-Extensions` was `permessage-deflate`
+direct to HA and empty through the proxy). Restored, on by default, via the new
+`compress_websocket` option: `threshold: 1024` so small control frames don't pay for it,
+`concurrencyLimit: 10` so a burst of reconnecting kiosks can't saturate the host, deflate on
+libuv's threadpool. Each compressed connection holds a ~300 KB zlib window — negligible for a
+few kiosks, ~15 MB across a 50-panel fleet. Turn it off only on very weak hardware.
 
-Now on by default via the new `compress_websocket` option, with a `threshold` so small control
-frames don't pay for it and a `concurrencyLimit` so a burst of reconnecting kiosks can't
-saturate the host. Deflate runs on libuv's threadpool rather than the main loop. Turn it off
-on very weak hardware.
+**`subscribe_events("state_changed")` bypassed the allowlist entirely** (#19). The egress
+filter only ever matched `subscribe_entities`, so any client subscribing the older way —
+some custom cards and resident modules do — received every state change on the instance, in
+the legacy format with full `old_state` and `new_state`: ~490 MB/h measured on one panel
+trimmed to 104 of 9,285 entities. Those subscriptions are now tracked and filtered to the
+allowlist. It went unnoticed because HA **batches** queued messages into a JSON array, and
+every `m.type` check saw `undefined` on an array; batched frames are now filtered element
+by element. (A client that deliberately wants global `state_changed` is withheld the
+non-allowlisted entities, consistent with what `strip_entities` already does.)
+
+**Cards configured with a device id no longer lose that device's entities** (#20). Some
+custom cards (`ha-bambulab-print_status-card`, `whisker-card`) are configured with a
+*device* and resolve its entities in the browser, so the structural walk found no entity ids
+and stripped all of them — 57 on one card, rendering it empty with no error anywhere. Any
+string that is a **registered** device id, under any key, now expands to that device's
+enabled entities; a 32-hex string that isn't in the device registry adds nothing.
+
+**Group expansion only admits members that exist in the state machine** (#12). A group's
+`entity_id` attribute lists members whether or not HA serves them — most often because the
+member is *disabled*. On one instance 87 Hue groups listed 239 such ids, inflating a
+772-entity allowlist by 31% and every per-dashboard count with it. Harmless to forward,
+but it is the number people tune `dashboards` against. No live entity can be lost.
+
+**Dockerfile honours the lockfile** (#23). It copied only `package.json` and ran
+`npm install`, so every `^` range was re-resolved at build time and two builds of the same
+commit could ship different dependency trees. Now `COPY package-lock.json` + `npm ci`.
+
+**An add-on icon** (#18), generated from `tools/make_icon.py` rather than committed as a
+blob, and a README banner.
 
 ## 0.2.4 — 2026-09-17
 

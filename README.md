@@ -228,9 +228,20 @@ If this saved you an evening of debugging, a coffee is appreciated.
 
 [![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?style=flat-square&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/gabrielgoldstein)
 
-## What's new in 0.2.4
+## What's new in 0.2.5
 
 Full history in [`websocket-stripper/CHANGELOG.md`](websocket-stripper/CHANGELOG.md).
+
+- **Websocket compression restored** — the proxy was silently serving plaintext JSON where HA
+  itself negotiates `permessage-deflate`. New `compress_websocket` option, on by default.
+- **Closed a firehose leak**: clients using `subscribe_events("state_changed")` got every
+  state change on the instance (~490 MB/h measured). Now filtered, including HA's batched
+  array frames.
+- **Cards configured with a device id** (Bambu Lab, Litter-Robot, …) keep their entities.
+- **Allowlist counts are honest** — disabled group members no longer inflate them.
+- Dockerfile installs from the lockfile (`npm ci`); add-on icon.
+
+### 0.2.4
 
 - **Fixed the redirect loop behind an HTTPS reverse proxy** (Caddy / NPM / DuckDNS) — the
   proxy now rewrites a redirect's scheme as well as its host, so `https://` pages no longer
