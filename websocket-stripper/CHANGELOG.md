@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+- **The stats port answers Ingress and loopback only, by source address.** With host networking
+  the port is bound on the host, and it served client addresses, entity counts and uptime to the
+  whole LAN unauthenticated. Supervisor (the hassio network) and loopback are accepted; anything
+  else gets a 403 and one throttled log line. `stats_lan: true` opens it for a `rest` sensor.
+- The "Served from cache" tile is gone: nothing produced cache hits yet, so it read `0 / 0 B`
+  forever. It returns with whatever lands registry caching.
+
+**A statistics panel in the Home Assistant sidebar, and a JSON API behind it.**
+
+Until now the only evidence the add-on was doing anything was the log, which you read once
+something already looks wrong — so a correctly working install was indistinguishable from a
+broken one until a card went "unavailable". The panel shows connected clients, how big the
+allowlist is against the size of the instance, measured before/after sizes for what it trims,
+and live update throughput.
+
+Served over Ingress on its own port (8100), so it needs no configuration and no extra exposed
+port; the same data is at `http://<host>:8100/stats.json` for a `rest` sensor or a scrape. The
+add-on binds whatever `ingress_port` Supervisor reports for it rather than assuming, so the two
+cannot drift apart — and `ingress_port: 0` (dynamic allocation) would work unchanged.
+
+It reports only what it can honestly measure. `get_states` has a real before/after — the proxy
+holds HA's full answer and its own trimmed answer in the same function, so "saved" is a
+subtraction. The event stream does not: HA filters it server-side from the `entity_ids` the
+add-on injects, so the untrimmed volume never exists anywhere and cannot be measured. It is
+reported as throughput and never folded into the savings total.
+
 ## 0.2.4 — 2026-09-17
 
 Redirects behind an HTTPS terminator, and the companion app. Both from #9's second report.

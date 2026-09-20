@@ -16,6 +16,15 @@ init: false
 # on the host, and the internal `homeassistant`/`supervisor` DNS names may not resolve —
 # use the ha_base / allow_ws_url options below to pin them to IPs if startup fails.
 host_network: true
+# Ingress: puts the add-on's statistics panel in the Home Assistant sidebar, with no
+# configuration and no extra exposed port to reach it through. It serves on 8100 (STATS_PORT
+# in the proxy), separate from the proxy port, so a dashboard url_path can never collide with
+# a stats path. Read-only — it reports, it cannot change anything.
+ingress: true
+ingress_port: 8100
+panel_icon: mdi:filter-variant
+panel_title: Stripper
+panel_admin: false
 # SUPERVISOR_TOKEN + core API access (used only to precompute the dashboard allowlists).
 homeassistant_api: true
 hassio_api: true
@@ -33,6 +42,10 @@ options:
   never_forward: []
   strip_entities: true
   port: 8099
+  # The stats port answers Home Assistant Ingress (the sidebar panel) and loopback only.
+  # With host networking it is bound on the host, so this is what keeps client addresses and
+  # entity counts off the LAN. Set true to read stats.json from elsewhere (a `rest` sensor).
+  stats_lan: false
   ha_base: ""
   allow_ws_url: ""
 schema:
@@ -44,5 +57,6 @@ schema:
     - str
   strip_entities: bool
   port: "int(1,65535)?"
+  stats_lan: "bool?"
   ha_base: "str?"
   allow_ws_url: "str?"

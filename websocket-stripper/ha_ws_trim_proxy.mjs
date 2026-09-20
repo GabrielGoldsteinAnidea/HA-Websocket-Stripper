@@ -30,6 +30,7 @@ import fs from 'node:fs';
 import httpProxy from 'http-proxy';
 import { WebSocketServer, WebSocket } from 'ws';
 import { extractEntities, collectTemplates, expandGroupMembers } from './lovelace_extract.mjs';
+import * as stats from './stats.mjs';
 
 // ---- config (add-on options.json or env) ----
 function loadOptions() {
@@ -53,6 +54,46 @@ const HA_WS = HA_BASE.replace(/^http/, 'ws') + '/api/websocket';     // browser 
 // add-on binds this directly on the host, so the option is the only way to move it off
 // 8099 (the Network tab can't remap a host-network port) — see issue #6.
 const PORT = parseInt(process.env.PORT || OPT.port || '8099', 10);
+// The stats panel + JSON API get their own port, deliberately NOT PORT: everything on PORT is
+// the proxied Home Assistant namespace, and a dashboard whose url_path collided with a stats
+// path would be a confusing failure.
+//
+// This is NOT an add-on option, and deliberately so. Supervisor proxies ingress to the
+// `ingress_port` from config.yaml, and that field is not settable through the add-on options
+// API (`SCHEMA_OPTIONS` accepts `ingress_panel` but not `ingress_port`). An option the user
+// could change would therefore leave Supervisor proxying the sidebar to a port nothing is
+// listening on — a silent 502 with no obvious cause.
+//
+// Instead the add-on asks Supervisor which port it was actually assigned and binds exactly
+// that. Under host networking the add-on binds the host port itself, so agreeing with
+// Supervisor is the only way to be reachable. It also means a maintainer can switch
+// config.yaml to `ingress_port: 0` — dynamic allocation from Supervisor's reserved range,
+// which cannot collide with a fixed port already in use — without touching this code.
+const STATS_PORT_FALLBACK = parseInt(process.env.STATS_PORT || '8100', 10);
+// Off by default: the stats port answers Ingress (Supervisor) and loopback only. See
+// statsPeerAllowed() in stats.mjs for why the LAN is refused unless asked for.
+const STATS_LAN = OPT.stats_lan !== undefined ? !!OPT.stats_lan
+  : (process.env.STATS_LAN ?? '0') !== '0';
+
+async function resolveStatsPort() {
+  // Dev / non-add-on: nothing to ask, use the fallback.
+  if (!process.env.SUPERVISOR_TOKEN) return STATS_PORT_FALLBACK;
+  try {
+    const res = await fetch('http://supervisor/addons/self/info', {
+      headers: { authorization: `Bearer ${process.env.SUPERVISOR_TOKEN}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const port = (await res.json())?.data?.ingress_port;
+    if (Number.isInteger(port) && port > 0) return port;
+    throw new Error(`no usable ingress_port (got ${JSON.stringify(port)})`);
+  } catch (e) {
+    log(`stats: could not ask Supervisor for the ingress port (${e.message}) — using ${STATS_PORT_FALLBACK}`);
+    return STATS_PORT_FALLBACK;
+  }
+}
+// How big the instance is, taken from the control connection's own get_states — which asks
+// for everything by definition. Lets the panel say "104 of 9,751", not just "104".
 const DASH_PATHS = toList(OPT.dashboards ?? (process.env.DASH_PATHS || process.env.DASH_PATH));
 // strip_entities: true (default) = inject the allowlist so HA streams only needed entities.
 //   false = pass the websocket straight through (full firehose) for A/B comparison.
@@ -133,6 +174,7 @@ process.on('unhandledRejection', (e) => {
 });
 
 let ALLOW = new Set();
+let INSTANCE_ENTITIES = 0;
 // Every live browser <-> HA bridge, so a grown allowlist can reach already-open pages
 // (issue #7). See refreshOpenConnections().
 const openBridges = new Set();
@@ -216,6 +258,7 @@ async function renderTemplates(cfg, renderTemplate) {
 // Build the union allowlist over all configured dashboards using an authed rpc().
 async function buildAllow(rpc, renderTemplate) {
   const states = await rpc({ type: 'get_states' });
+  INSTANCE_ENTITIES = states.length;
   const realIds = states.map((s) => s.entity_id);
   const registries = await fetchRegistries(rpc);
   const union = new Set();
@@ -522,6 +565,12 @@ proxy.on('proxyRes', (proxyRes, req) => {
 //     `len(forwarded_proto) not in (1, len(forwarded_for))`
 // -> a hard 400 on every request. Keeping the chain intact keeps the counts in step, and
 // preserves the real client IP through the upstream proxy instead of hiding it behind Caddy.
+// The browser's address, preferring a forwarded chain when this add-on sits behind another
+// proxy. Used only to label connections in the stats panel.
+const clientIp = (req) => String(
+  req.headers['x-forwarded-for']?.split(',')[0] || req.socket?.remoteAddress || ''
+).trim().replace(/^::ffff:/, '');
+
 const normalizeXff = (v) => String(v).split(',').map((s) => s.trim().replace(/^::ffff:/, '')).filter(Boolean).join(', ');
 proxy.on('proxyReq', (proxyReq, req) => {
   const xff = proxyReq.getHeader('x-forwarded-for') ?? req.headers['x-forwarded-for'];
@@ -575,7 +624,7 @@ server.on('upgrade', (req, socket, head) => {
       } catch { socket.destroy(); }
       return;
     }
-    wss.handleUpgrade(req, socket, head, (browserWs) => bridge(browserWs));
+    wss.handleUpgrade(req, socket, head, (browserWs) => bridge(browserWs, { ip: clientIp(req) }));
   } else {
     // Keyed on the path, not req.url: camera stream URLs carry a per-request signature, so
     // keying on the whole thing would defeat the throttle (and grow the map) during a retry storm.
@@ -584,8 +633,9 @@ server.on('upgrade', (req, socket, head) => {
   }
 });
 
-function bridge(browserWs) {
+function bridge(browserWs, meta = {}) {
   const haWs = new WebSocket(HA_WS, { perMessageDeflate: true, maxPayload: 0 });
+  const connId = stats.connOpen({ ip: meta.ip, allowSize: ALLOW.size });
   const getStatesIds = new Set();
   const subEntityIds = new Set();   // subscribe_entities subs we injected the allowlist into
   const queue = []; let haOpen = false;
@@ -615,12 +665,24 @@ function bridge(browserWs) {
 
   haWs.on('message', (raw) => {
     let s = raw.toString(); let m;
-    try { m = JSON.parse(s); } catch { return safeSend(s); }
+    // Measured on the decoded JSON, i.e. what the browser must parse. The wire is smaller
+    // when permessage-deflate is negotiated, and that is deliberately not what is reported.
+    const inBytes = Buffer.byteLength(s);
+    let cat = null;
+    let isEvent = false;
+    const done = () => {
+      const outBytes = Buffer.byteLength(s);
+      if (cat) stats.recordTrim(cat, inBytes, outBytes);
+      stats.connTraffic(connId, inBytes, outBytes, isEvent);
+      return safeSend(s);
+    };
+    try { m = JSON.parse(s); } catch { return done(); }
     if (STRIP && m && m.type === 'result' && getStatesIds.has(m.id) && Array.isArray(m.result)) {
       const before = m.result.length;
       m.result = m.result.filter((e) => ALLOW.has(e.entity_id));
       getStatesIds.delete(m.id);
       s = JSON.stringify(m);
+      cat = 'states';
       log(`get_states trimmed ${before} -> ${m.result.length}`);
     }
     // Defensive egress filter (belt-and-suspenders): HA already trims to the injected
@@ -642,12 +704,14 @@ function bridge(browserWs) {
         if (ev.r.length !== before) changed = true;
       }
       if (changed) s = JSON.stringify(m);
+      stats.recordEvent(Buffer.byteLength(s));
+      isEvent = true;
     }
-    safeSend(s);
+    return done();
   });
 
   function safeSend(s) { try { if (browserWs.readyState === 1) browserWs.send(s); } catch {} }
-  const close = () => { openBridges.delete(close); try { browserWs.close(); } catch {} try { haWs.close(); } catch {} };
+  const close = () => { openBridges.delete(close); stats.connClose(connId); try { browserWs.close(); } catch {} try { haWs.close(); } catch {} };
   openBridges.add(close);            // so a grown allowlist can recycle this connection (#7)
   browserWs.on('close', close); browserWs.on('error', close);
   haWs.on('close', close);
@@ -661,6 +725,58 @@ log(`mode: ${inAddon ? 'add-on' : 'dev'} | target ${HA_BASE} | allowlist via ${A
 // (host boot, a core update), and core can take minutes to answer — the proxy's job is to
 // wait for it, not to exit. HTTP proxies through immediately (502 while HA is down, like any
 // reverse proxy); /api/websocket is refused until the first allowlist lands, above.
+// ---- stats panel + JSON API ----
+// Served on STATS_PORT, which config.yaml declares as the add-on's `ingress_port`, so Home
+// Assistant renders the panel in the sidebar with no configuration at all. The same JSON is
+// reachable directly at http://<host>:8100/stats.json for a `rest` sensor or a scrape.
+//
+// Read-only by design: it reports what the proxy already logs and offers no way to change
+// anything. Ingress hands the page to any logged-in HA user, so a panel that could mutate
+// options would need a permission model it has no business owning.
+const PANEL_HTML = (() => {
+  try { return fs.readFileSync(new URL('./panel.html', import.meta.url)); }
+  catch (e) { log(`stats: panel.html unreadable (${e.message}) — the JSON API still works`); return null; }
+})();
+
+function statsExtras() {
+  return {
+    version: VERSION,
+    options: { strip_entities: STRIP },
+    allowlist: { ready: ALLOW_READY, union: ALLOW.size, instanceEntities: INSTANCE_ENTITIES },
+  };
+}
+
+const statsServer = http.createServer((req, res) => {
+  // Source address, not headers: with host_network this port is on the LAN, and it serves
+  // client addresses, entity counts and uptime with no authentication of its own.
+  const peer = String(req.socket?.remoteAddress || '');
+  if (!stats.statsPeerAllowed(peer, STATS_LAN)) {
+    logThrottled('stats-denied', `stats: refused ${peer.replace(/^::ffff:/, '')} — served to Ingress and loopback only; set stats_lan: true to serve the LAN`);
+    res.writeHead(403, { 'content-type': 'text/plain' });
+    return res.end('stats are served through Home Assistant Ingress; set stats_lan: true to read them from the LAN');
+  }
+  // Ingress rewrites the path prefix, so match on the tail rather than the whole URL.
+  const path = String(req.url || '/').split('?')[0].replace(/\/+$/, '') || '/';
+  if (path.endsWith('/stats.json')) {
+    const body = JSON.stringify(stats.snapshot(statsExtras()), null, 2);
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    return res.end(body);
+  }
+  if (path === '/' || path.endsWith('/index.html')) {
+    if (!PANEL_HTML) { res.writeHead(500, { 'content-type': 'text/plain' }); return res.end('panel.html missing'); }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+    return res.end(PANEL_HTML);
+  }
+  res.writeHead(404, { 'content-type': 'text/plain' });
+  res.end('not found');
+});
+// A stats port that will not bind is an inconvenience, not a reason to take the proxy down
+// with it — the add-on's actual job is unaffected. Log and carry on, unlike PORT below.
+statsServer.on('error', (e) => logThrottled(`stats:${e.code || e.message}`, `stats server unavailable (${e.message}) — proxying is unaffected`));
+resolveStatsPort().then((statsPort) => {
+  statsServer.listen(statsPort, () => log(`stats panel on :${statsPort} (ingress) — JSON at :${statsPort}/stats.json`));
+});
+
 server.listen(PORT, () => {
   log(`HA trim-proxy listening on :${PORT}  ->  ${HA_BASE}`);
   DASH_PATHS.forEach((p) => log(`  open: http://<host>:${PORT}/${p}`));

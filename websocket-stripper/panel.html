@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebSocket Stripper</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --fg: #1b1f23; --muted: #6b7280;
+    --line: #e5e7eb; --accent: #03a9f4; --good: #2e7d32; --warn: #b26a00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111418; --card: #1c2026; --fg: #e8eaed; --muted: #9aa0a6;
+      --line: #2b313a; --accent: #4fc3f7; --good: #81c784; --warn: #ffb74d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  h1 { font-size: 20px; margin: 0 0 2px; }
+  h2 { font-size: 14px; margin: 0 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+  .big { font-size: 26px; font-weight: 600; }
+  .big.good { color: var(--good); }
+  .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: right; padding: 7px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  tr:last-child td { border-bottom: none; }
+  .scroll { overflow-x: auto; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); color: var(--muted); }
+  .pill.on { color: var(--good); border-color: var(--good); }
+  .note { color: var(--muted); font-size: 12px; margin-top: 10px; }
+  .err { color: var(--warn); }
+  a { color: var(--accent); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--good); margin-right: 6px; vertical-align: middle; }
+</style>
+</head>
+<body>
+  <h1><span class="dot"></span>WebSocket Stripper</h1>
+  <div class="sub" id="sub">loading…</div>
+
+  <div class="card">
+    <div class="grid">
+      <div><div class="label">Saved on page loads</div><div class="big good" id="savedPct">—</div><div class="label" id="savedAbs">&nbsp;</div></div>
+      <div><div class="label">Clients connected</div><div class="big" id="clients">—</div><div class="label" id="clientsTotal">&nbsp;</div></div>
+      <div><div class="label">Live update traffic</div><div class="big" id="evRate">—</div><div class="label">per client, per minute</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>What got trimmed</h2>
+    <div class="scroll"><table id="cats"><thead>
+      <tr><th>Payload</th><th>Times</th><th>Home Assistant sent</th><th>Browser got</th><th>Saved</th><th>%</th></tr>
+    </thead><tbody></tbody></table></div>
+    <div class="note">Measured before/after on real answers. Sizes are uncompressed payload — the
+      bytes the browser has to parse. With <code>compress_websocket</code> on, fewer bytes than
+      this actually cross the wire.</div>
+  </div>
+
+  <div class="card" id="dashCard" hidden>
+    <h2>Dashboards</h2>
+    <div class="scroll"><table id="dash"><thead>
+      <tr><th>Dashboard</th><th>Entities</th><th>of instance</th><th>Resources kept</th><th>Resource KB kept</th><th>KB dropped</th></tr>
+    </thead><tbody></tbody></table></div>
+  </div>
+
+  <div class="card">
+    <h2>Connected now</h2>
+    <div class="scroll"><table id="cl"><thead>
+      <tr><th>Client</th><th>Dashboard</th><th>Entities</th><th>Connected</th><th>Msgs</th><th>Updates/min</th></tr>
+    </thead><tbody></tbody></table></div>
+    <div class="note">Live update traffic is throughput, not a saving: Home Assistant filters the
+      event stream server-side from the entity list this add-on injects, so the untrimmed volume
+      never exists and cannot honestly be measured. Compare it against a run with
+      <code>strip_entities: false</code> if you want the A/B.</div>
+  </div>
+
+  <div class="sub">Raw JSON: <a href="./stats.json" target="_blank">stats.json</a> — point a Home
+    Assistant <code>rest</code> sensor at it to graph any of this over time.</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const kb = (b) => (b == null ? '—' : b < 1024 ? b + ' B'
+  : b < 1024 * 1024 ? (b / 1024).toFixed(0) + ' KB'
+  : (b / 1024 / 1024).toFixed(1) + ' MB');
+const dur = (s) => s < 60 ? s + 's' : s < 3600 ? Math.floor(s / 60) + 'm'
+  : s < 86400 ? Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm'
+  : Math.floor(s / 86400) + 'd ' + Math.floor((s % 86400) / 3600) + 'h';
+const rows = (tbl, data, cells) => {
+  const tb = $(tbl).querySelector('tbody');
+  tb.innerHTML = '';
+  if (!data.length) {
+    const tr = tb.insertRow();
+    const td = tr.insertCell();
+    td.colSpan = $(tbl).querySelectorAll('thead th').length;
+    td.textContent = 'nothing yet';
+    td.style.color = 'var(--muted)';
+    return;
+  }
+  for (const d of data) {
+    const tr = tb.insertRow();
+    for (const v of cells(d)) tr.insertCell().textContent = v;
+  }
+};
+
+const NICE = {
+  states: 'Entity states (get_states)',
+  'registry:entity': 'Entity registry',
+  'registry:entity_display': 'Entity registry (display)',
+  'registry:device': 'Device registry',
+  'registry:area': 'Area registry',
+  resources: 'Custom cards (resources)',
+  services: 'Service list (get_services)',
+};
+
+async function tick() {
+  let s;
+  try {
+    const r = await fetch('./stats.json', { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    s = await r.json();
+  } catch (e) {
+    $('sub').innerHTML = '<span class="err">Cannot reach the add-on: ' + e.message + '</span>';
+    return;
+  }
+
+  const opts = s.options || {};
+  const pills = Object.entries(opts)
+    .filter(([, v]) => typeof v === 'boolean')
+    .map(([k, v]) => '<span class="pill' + (v ? ' on' : '') + '">' + k + (v ? ' on' : ' off') + '</span>')
+    .join(' ');
+  $('sub').innerHTML = 'v' + (s.version || '?') + ' · up ' + dur(s.uptimeSec) + ' · ' + pills;
+
+  $('savedPct').textContent = (s.savings.savedPct || 0) + '%';
+  $('savedAbs').textContent = kb(s.savings.saved) + ' of ' + kb(s.savings.before) + ' not sent';
+  $('clients').textContent = s.clients.open;
+  $('clientsTotal').textContent = s.clients.total + ' since start';
+  // Only clients old enough to have a real rate; the rest report null on purpose.
+  const rated = s.clients.list.filter((c) => c.eventBytesPerMin != null);
+  $('evRate').textContent = rated.length
+    ? kb(Math.round(rated.reduce((t, c) => t + c.eventBytesPerMin, 0) / rated.length))
+    : '—';
+
+  rows('cats', Object.entries(s.savings.byCategory), ([k, v]) => [
+    NICE[k] || k, v.count, kb(v.before), kb(v.after), kb(v.saved), v.savedPct + '%',
+  ]);
+
+  // Shown only when per-dashboard allowlists exist; today every connection gets the union.
+  const byDash = s.allowlist.byDashboard || {};
+  $('dashCard').hidden = Object.keys(byDash).length === 0;
+  const total = s.allowlist.instanceEntities || 0;
+  rows('dash', Object.entries(byDash), ([name, n]) => {
+    const res = (s.resources.byDashboard || {})[name] || {};
+    return [
+      name, n, total ? ((n / total) * 100).toFixed(1) + '%' : '—',
+      res.kept != null ? res.kept + '/' + (res.kept + res.dropped) : '—',
+      res.keptKB != null ? res.keptKB : '—',
+      res.droppedKB != null ? res.droppedKB : '—',
+    ];
+  });
+
+  rows('cl', s.clients.list, (c) => [
+    c.ip || '?', c.dashboard || '(all dashboards)',
+    c.allowSize, dur(c.connectedSec), c.messages, kb(c.eventBytesPerMin),
+  ]);
+}
+tick();
+setInterval(tick, 5000);
+</script>
+</body>
+</html>

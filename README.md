@@ -198,6 +198,16 @@ integration tests that drive the real proxy against a mock HA).
 
 Set `STRIP_ENTITIES=0` to passthrough untrimmed for an A/B load comparison.
 
+## Seeing what it does
+
+The add-on puts a **Stripper** panel in the Home Assistant sidebar (via Ingress) showing which
+clients are connected, how many entities each is being served against the size of your
+instance, measured before/after sizes for what it trims, and live update throughput. The same
+data is JSON at `http://<host>:8100/stats.json`, so a `rest` sensor can graph it.
+
+Previously the only evidence the add-on was working was the log — which you tend to read only
+once something already looks broken.
+
 ## Notes
 
 - The frontend JS bundles still load (and are cached after first visit); this targets the

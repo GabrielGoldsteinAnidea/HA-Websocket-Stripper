@@ -8,7 +8,7 @@ COPY package.json ./
 RUN npm install --omit=dev --no-audit --no-fund
 
 # App code.
-COPY ha_ws_trim_proxy.mjs lovelace_extract.mjs ./
+COPY ha_ws_trim_proxy.mjs lovelace_extract.mjs stats.mjs panel.html ./
 
 # Supervisor provides SUPERVISOR_TOKEN and mounts user config at /data/options.json.
 CMD ["node", "ha_ws_trim_proxy.mjs"]
