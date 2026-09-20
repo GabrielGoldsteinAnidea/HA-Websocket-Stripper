@@ -4,7 +4,7 @@
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractEntities, collectTemplates, expandGroupMembers, toMatcher } from '../lovelace_extract.mjs';
+import { extractEntities, collectTemplates, expandGroupMembers, toMatcher, looksCatastrophic } from '../lovelace_extract.mjs';
 import { STATES, REGISTRIES } from './fixtures.mjs';
 
 // Allowlist mode: this is exactly how ha_ws_trim_proxy.mjs calls the extractor.
@@ -140,5 +140,50 @@ describe('group membership expansion (issue #4)', () => {
     ];
     assert.deepEqual([...expandGroupMembers(['group.a'], cyclic)].sort(),
       ['group.a', 'group.b', 'light.kitchen']);
+  });
+});
+
+// A dashboard author's regex runs here against every entity on the instance, on the event loop
+// every panel's websocket shares. In the card it would hang one browser tab; here, every panel.
+describe('a dashboard regex cannot stall the event loop', () => {
+  test('flags a nested quantifier and leaves ordinary patterns alone', () => {
+    for (const bad of ['^(a+)+$', '^(\\w+\\s?)+$', '(x{2,})+']) assert.ok(looksCatastrophic(bad), bad);
+    // An overlapping alternation under a quantifier is the worse class: /^(a|a)+$/ measured 5.4s
+    // on 27 characters, against 12.3s for (a+)+ on 40.
+    for (const bad of ['^(a|a)+$', '^(a|ab)*$', '^(\\d|\\d\\d)+$']) assert.ok(looksCatastrophic(bad), bad);
+    for (const ok of ['^sensor\\.pv_.*_power$', '^[+*]+$', 'battery$', '^light\\.(kitchen|hall)$']) {
+      assert.ok(!looksCatastrophic(ok), ok);
+    }
+    // (ab|cd)+ cannot backtrack badly but IS flagged: the detector is deliberately loose, and
+    // flagging only costs the guarded path — it never costs a match.
+    assert.ok(looksCatastrophic('(ab|cd)+'));
+    assert.equal(toMatcher('/^(ab|cd)+$/')('abcdab'), true, 'and it still matches');
+  });
+
+  test('a catastrophic pattern is cut off, switched off, and reported — once', () => {
+    const notes = [];
+    const m = toMatcher('/^(b+)+$/', (n) => notes.push(n));
+    let t = Date.now();
+    assert.equal(m(`${'b'.repeat(40)}!`), false);
+    assert.ok(Date.now() - t < 2000, 'bounded by the deadline, not by the backtracking');
+    t = Date.now();
+    assert.equal(m(`${'b'.repeat(41)}!`), false);
+    assert.ok(Date.now() - t < 50, 'a disabled pattern costs nothing afterwards');
+    assert.ok(notes.some((n) => /disabled/.test(n)), notes);
+  });
+
+  test('a nested quantifier that behaves is still honoured', () => {
+    const m = toMatcher('/^(ab+)+$/');
+    assert.equal(m('abbabb'), true);
+    assert.equal(m('xyz'), false);
+  });
+
+  test('the guard reports through unsupported, so a blank card has an explanation', () => {
+    const states = [{ entity_id: 'sensor.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_x', state: 'on', attributes: {} }];
+    const got = extractEntities(
+      { views: [{ cards: [{ type: 'custom:auto-entities', filter: { include: [{ entity_id: '/^sensor\\.(a+)+$/' }] } }] }] },
+      states, { overInclude: true });
+    assert.deepEqual(got.entities, []);
+    assert.ok(got.unsupported.some((u) => /disabled/.test(u)), got.unsupported);
   });
 });

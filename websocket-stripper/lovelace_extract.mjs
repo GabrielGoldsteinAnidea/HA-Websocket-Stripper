@@ -18,6 +18,8 @@
 //                      Collect the templates with collectTemplates(), render them through
 //                      HA, and pass the results back in (this module can't render itself).
 
+import vm from 'node:vm';
+
 const ID_RE = /^[a-z_][a-z0-9_]*\.[a-z0-9_]+$/;
 export const isEntityId = (s) => typeof s === 'string' && ID_RE.test(s);
 
@@ -31,7 +33,7 @@ export const isEntityId = (s) => typeof s === 'string' && ID_RE.test(s);
 // Previously only the glob form existed, and a /regex/ was escaped as literal text — so
 // `/^sensor\.pv_.*_power$/` compiled to `^/\^sensor\\\.pv_.*_power\$/$` and matched nothing
 // (issue #10). Upstream ORs the regex against exact equality, so we do too.
-export function toMatcher(pattern) {
+export function toMatcher(pattern, note = null) {
   if (typeof pattern !== 'string') return (v) => v === pattern;
   const tests = [];
   if ((pattern.startsWith('/') && pattern.endsWith('/') && pattern.length > 1) || pattern.includes('*')) {
@@ -41,12 +43,88 @@ export function toMatcher(pattern) {
     // only ever in the safe direction for an allowlist.)
     if (!p.startsWith('/')) p = `/^${p.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$/`;
     try {
-      const re = new RegExp(p.slice(1, -1));
-      tests.push((v) => typeof v === 'string' && re.test(v));
+      const src = p.slice(1, -1);
+      const re = new RegExp(src);
+      // Only a regex somebody WROTE can backtrack catastrophically; a converted glob cannot nest
+      // a quantifier, so it keeps the plain, free `re.test`.
+      const test = p === pattern && looksCatastrophic(src) ? guardedTest(re, src, note) : (v) => re.test(v);
+      tests.push((v) => typeof v === 'string' && test(v));
     } catch { /* an unparseable regex simply contributes no matches */ }
   }
   tests.push((v) => v === pattern);
   return (v) => tests.some((t) => t(v));
+}
+
+// ---- catastrophic-backtracking guard ----
+//
+// A `/regex/` written in a dashboard is run HERE against every entity id and friendly name on the
+// instance, synchronously, on the one event loop that also relays every panel's websocket — and
+// again on every allowlist rebuild. In the auto-entities card the same pattern runs in the browser
+// tab showing the card, so a pathological one hangs that tab and nothing else. Here it hangs every
+// panel in the house: measured, `/^(a+)+$/` against a single 31-character string held the loop for
+// 49 seconds.
+//
+// Rejecting a suspicious pattern outright would be the wrong trade — a rejected filter matches
+// nothing, and under-including is the direction that blanks a card — and most nested quantifiers
+// are harmless on real input. So a suspicious pattern is still RUN, just under a deadline: `vm`
+// can interrupt a regex mid-backtrack, which nothing else in JavaScript can. That costs roughly
+// 40µs per call, which is why only patterns the static check flags take this path, and why the
+// results are memoised: ids and names barely change between rebuilds, so the second rebuild
+// onwards pays nothing.
+//
+// A pattern that does hit the deadline is switched off for the life of the process and reported
+// through `unsupported`. The stall is therefore bounded at one deadline per bad pattern, ever,
+// rather than one per entity per rebuild.
+const REGEX_DEADLINE_MS = 50;
+const REGEX_MEMO_MAX = 20000;
+const REGEX_KILLED = new Set();            // regex source
+const REGEX_MEMO = new Map();              // regex source -> Map(value -> boolean)
+let guardCtx = null, guardScript = null;
+
+// A quantified group whose body contains EITHER another quantifier — (a+)+, (\w+\s?)*, (x{2,})+ —
+// OR an alternation: (a|a)+, (a|ab)*, (\d|\d\d)+.
+//
+// Both halves are needed, and the alternation one is the worse: an overlapping alternation under a
+// quantifier backtracks just as explosively, and `/^(a|a)+$/` against a 27-character string
+// measured 5.4 SECONDS — doubling with every further character — against 12.3s for the `(a+)+`
+// case. A first version of this detector caught only the second.
+//
+// Innermost groups only, escapes skipped. Deliberately loose: it flags `(ab|cd)+`, which cannot
+// backtrack badly at all, because a false positive costs only the guarded path (measured: 424ms
+// across 10,000 first-pass calls, ~0 once memoised) while a false negative costs the event loop.
+// Flagging is not rejecting — a flagged pattern still runs and still matches.
+export function looksCatastrophic(src) {
+  const body = '(?:[^()\\\\]|\\\\.)*';
+  const quant = '(?:[+*]|\\{\\d+,\\d*\\})';
+  return new RegExp(`\\(${body}(?:${quant}|\\|)${body}\\)${quant}`).test(src);
+}
+
+function guardedTest(re, src, note) {
+  const killedMsg = `auto-entities regex /${src}/ disabled: it exceeded ${REGEX_DEADLINE_MS}ms on one value `
+    + '(catastrophic backtracking) and would stall every panel — rewrite it without a nested quantifier';
+  return (v) => {
+    if (REGEX_KILLED.has(src)) { note?.(killedMsg); return false; }
+    let memo = REGEX_MEMO.get(src);
+    if (!memo) { memo = new Map(); REGEX_MEMO.set(src, memo); }
+    const seen = memo.get(v);
+    if (seen !== undefined) return seen;
+    if (!guardScript) {
+      guardCtx = vm.createContext(Object.create(null));
+      guardScript = new vm.Script('re.test(v)');
+    }
+    guardCtx.re = re; guardCtx.v = v;
+    let out;
+    try { out = Boolean(guardScript.runInContext(guardCtx, { timeout: REGEX_DEADLINE_MS })); }
+    catch {
+      REGEX_KILLED.add(src);
+      REGEX_MEMO.delete(src);
+      note?.(killedMsg);
+      return false;
+    }
+    if (memo.size >= REGEX_MEMO_MAX) memo.clear();
+    memo.set(v, out);
+    return out;
+  };
 }
 
 const asArray = (v) => (Array.isArray(v) ? v : [v]);
@@ -69,8 +147,8 @@ function coerceVal(v, key) {
 
 // Build a predicate for filter key `key` from its (possibly editor-wrapped) value: the value
 // matches if ANY of its alternatives matches, via the auto-entities matcher.
-function valMatcher(v, key) {
-  const ms = coerceVal(v, key).map((x) => toMatcher(typeof x === 'string' ? x : String(x)));
+function valMatcher(v, key, note = null) {
+  const ms = coerceVal(v, key).map((x) => toMatcher(typeof x === 'string' ? x : String(x), note));
   return (s) => ms.some((m) => m(s));
 }
 
@@ -110,39 +188,40 @@ function condTests(cond, unsupported, ctx) {
   const structural = [];
   const volatile = [];
   const reg = (s) => ctx.ent && ctx.ent.get(s.entity_id);
+  const note = (msg) => unsupported.push(msg);
 
   // Each key matches via the auto-entities matcher, so globs and regexes work everywhere
   // (issue #10). Registry-backed keys match against BOTH the id and the human name, the way
   // upstream does — `area: Kitchen` and `area: kitchen_area_id` both resolve.
   if (cond.domain != null) {
-    const m = valMatcher(cond.domain, 'domain');
+    const m = valMatcher(cond.domain, 'domain', note);
     structural.push((s) => m(s.entity_id.split('.')[0]));
   }
   if (cond.entity_id != null) {
-    const m = valMatcher(cond.entity_id, 'entity_id');
+    const m = valMatcher(cond.entity_id, 'entity_id', note);
     structural.push((s) => m(s.entity_id));
   }
   if (cond.area != null) {
-    const m = valMatcher(cond.area, 'area');
+    const m = valMatcher(cond.area, 'area', note);
     structural.push((s) => { const r = reg(s); return !!r && (m(r.areaId) || m(r.areaName)); });
   }
   if (cond.label != null) {
-    const m = valMatcher(cond.label, 'label');
+    const m = valMatcher(cond.label, 'label', note);
     structural.push((s) => { const r = reg(s); return !!r && (r.labelIds.some(m) || r.labelNames.some(m)); });
   }
   if (cond.device != null) {
-    const m = valMatcher(cond.device, 'device');
+    const m = valMatcher(cond.device, 'device', note);
     structural.push((s) => { const r = reg(s); return !!r && (m(r.deviceId) || m(r.deviceName)); });
   }
   if (cond.integration != null) {
-    const m = valMatcher(cond.integration, 'integration');
+    const m = valMatcher(cond.integration, 'integration', note);
     structural.push((s) => { const r = reg(s); return !!r && m(r.platform); });
   }
   // Upstream matches `name` against friendly_name. Structural, not volatile: a friendly name
   // is stable identity, unlike state — treating it as volatile would forward the whole
   // instance for any card whose only filter is a name.
   if (cond.name != null) {
-    const m = valMatcher(cond.name, 'name');
+    const m = valMatcher(cond.name, 'name', note);
     structural.push((s) => m(s.attributes?.friendly_name));
   }
   // `group: group.foo` -> the members listed in that group's entity_id attribute.
@@ -155,10 +234,10 @@ function condTests(cond, unsupported, ctx) {
     }
     structural.push((s) => members.has(s.entity_id));
   }
-  if (cond.state != null) { const m = toMatcher(cond.state); volatile.push((s) => m(s.state)); }
+  if (cond.state != null) { const m = toMatcher(cond.state, note); volatile.push((s) => m(s.state)); }
   if (cond.attributes && typeof cond.attributes === 'object') {
     for (const [k, v] of Object.entries(cond.attributes)) {
-      const m = toMatcher(v);
+      const m = toMatcher(v, note);
       volatile.push((s) => s.attributes && m(s.attributes[k]));
     }
   }
