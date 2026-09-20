@@ -99,8 +99,25 @@ export function buildRegistryCtx(registries = {}) {
       platform: e.platform || null,
     });
   }
-  return { ent };
+  // device id -> its entity ids. Needed because some cards are configured with a DEVICE
+  // rather than with entities, and resolve the device's entities themselves in the browser.
+  // See resolveDeviceIds() for why that breaks and how this fixes it.
+  const byDevice = new Map();
+  for (const e of entities) {
+    if (!e.device_id || !e.entity_id) continue;
+    // A disabled entity is never streamed, so pulling it in through its device would only
+    // re-inflate the allowlist count that the group-member check (#12) keeps honest.
+    if (e.disabled_by) continue;
+    if (!byDevice.has(e.device_id)) byDevice.set(e.device_id, []);
+    byDevice.get(e.device_id).push(e.entity_id);
+  }
+  return { ent, byDevice };
 }
+
+// Home Assistant device ids are 32 lowercase hex characters. Matching the shape alone would be
+// reckless, so a candidate only counts when it is ALSO a device that actually exists in the
+// registry — which makes a false positive essentially impossible.
+const DEVICE_ID_RE = /^[0-9a-f]{32}$/;
 
 // Split one auto-entities condition into structural tests (domain/entity_id/area/label/
 // device/integration — stable identity) and volatile tests (state/attributes — change at
@@ -260,6 +277,30 @@ function expandAutoEntities(node, allStates, add, unsupported, ctx, overInclude)
   }
 }
 
+// Add every entity of any device this card names, for the card-configured-with-a-device case.
+//
+// Only the node's OWN scalar values are considered — no recursion — because the walk already
+// visits every node, and a device id nested deeper belongs to whichever card actually holds it.
+// Arrays of device ids are handled too: several cards take `devices: [...]`.
+//
+// This deliberately admits the device's whole entity set rather than guessing which subset the
+// card renders. The card's internals are not knowable from here, and the failure modes are not
+// symmetric: including a few entities too many costs bandwidth, while missing one silently
+// empties a card on a wall panel with no error anywhere.
+function resolveDeviceIds(node, ctx, add) {
+  const byDevice = ctx.byDevice;
+  if (!byDevice || !byDevice.size) return;
+  const consider = (v) => {
+    if (typeof v !== 'string' || !DEVICE_ID_RE.test(v)) return;
+    const ids = byDevice.get(v);
+    if (ids) ids.forEach(add);
+  };
+  for (const v of Object.values(node)) {
+    if (Array.isArray(v)) v.forEach(consider);
+    else consider(v);
+  }
+}
+
 export function extractEntities(config, allStates = [], opts = {}) {
   const found = new Set();
   const unsupported = [];
@@ -279,6 +320,19 @@ export function extractEntities(config, allStates = [], opts = {}) {
     if (typeof node.type === 'string' && node.type.includes('auto-entities') && node.filter) {
       expandAutoEntities(node, allStates, add, unsupported, ctx, overInclude);
     }
+
+    // Cards configured with a DEVICE instead of with entities.
+    //
+    // Found on a live instance: `custom:ha-bambulab-print_status-card` is configured as
+    // `printer: 43f1e9fddd670256ced58c9fe7971e41` — a device id — and looks up that device's
+    // entities itself, in the browser. A structural walk sees no entity_id anywhere, so the
+    // dashboard resolved to 2 entities (its two lights) and the printer's 57 were stripped.
+    // The card then renders with nothing in it, which looks like a broken card rather than a
+    // trimming problem.
+    //
+    // The key name cannot be predicted — `printer` here, something else in the next card — so
+    // match on the VALUE being a real device id rather than on where it appears.
+    resolveDeviceIds(node, ctx, add);
 
     // Standard entity-bearing keys.
     if (typeof node.entity === 'string') add(node.entity);
