@@ -142,3 +142,53 @@ describe('group membership expansion (issue #4)', () => {
       ['group.a', 'group.b', 'light.kitchen']);
   });
 });
+
+// auto-entities' non-glob matcher forms. Each of these resolved to NOTHING before, silently:
+// an unrecognised pattern falls through to exact string equality, and "< 20" never equals a state.
+describe('auto-entities comparison and transform matchers', () => {
+  const S = [
+    { entity_id: 'sensor.phone_battery', state: '12', attributes: { device_class: 'battery', tags: ['a', 'b'] } },
+    { entity_id: 'sensor.remote_battery', state: '95', attributes: { device_class: 'battery' } },
+    { entity_id: 'sensor.loft_temp', state: '5', attributes: { device_class: 'temperature' } },
+  ];
+  // Current-state semantics, which is what a comparison is about.
+  const go = (filter) => extractEntities(
+    { views: [{ cards: [{ type: 'custom:auto-entities', filter }] }] }, S, { overInclude: false }).entities;
+
+  test('numeric comparisons, in auto-entities own spellings', () => {
+    assert.deepEqual(go({ include: [{ state: '< 20' }] }), ['sensor.loft_temp', 'sensor.phone_battery']);
+    assert.deepEqual(go({ include: [{ state: '<= 5' }] }), ['sensor.loft_temp']);
+    assert.deepEqual(go({ include: [{ state: '>= 95' }] }), ['sensor.remote_battery']);
+    assert.deepEqual(go({ include: [{ state: '> 90' }] }), ['sensor.remote_battery']);
+    assert.deepEqual(go({ include: [{ state: '== 12' }] }), ['sensor.phone_battery']);
+    assert.deepEqual(go({ include: [{ state: '=12' }] }), ['sensor.phone_battery']);
+  });
+
+  test('the low-battery card that started this', () => {
+    assert.deepEqual(go({ include: [{ attributes: { device_class: 'battery' }, state: '< 20' }] }),
+      ['sensor.phone_battery']);
+  });
+
+  test('$$ matches against the JSON of a structured attribute', () => {
+    assert.deepEqual(go({ include: [{ attributes: { tags: '$$*"b"*' } }] }), ['sensor.phone_battery']);
+  });
+
+  test('exact and glob matching are unchanged', () => {
+    assert.deepEqual(go({ include: [{ state: '12' }] }), ['sensor.phone_battery']);
+    assert.deepEqual(go({ include: [{ entity_id: 'sensor.*_battery' }] }),
+      ['sensor.phone_battery', 'sensor.remote_battery']);
+  });
+
+  test('an "ago" suffix compares the age of a timestamp', () => {
+    const recent = new Date(Date.now() - 5 * 60000).toISOString();
+    const old = new Date(Date.now() - 5 * 3600000).toISOString();
+    const states = [
+      { entity_id: 'sensor.fresh', state: recent, attributes: {} },
+      { entity_id: 'sensor.stale', state: old, attributes: {} },
+    ];
+    const got = extractEntities(
+      { views: [{ cards: [{ type: 'custom:auto-entities', filter: { include: [{ state: '> 60 m ago' }] } }] }] },
+      states, { overInclude: false }).entities;
+    assert.deepEqual(got, ['sensor.stale']);
+  });
+});

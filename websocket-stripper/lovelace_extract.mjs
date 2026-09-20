@@ -31,9 +31,34 @@ export const isEntityId = (s) => typeof s === 'string' && ID_RE.test(s);
 // Previously only the glob form existed, and a /regex/ was escaped as literal text — so
 // `/^sensor\.pv_.*_power$/` compiled to `^/\^sensor\\\.pv_.*_power\$/$` and matched nothing
 // (issue #10). Upstream ORs the regex against exact equality, so we do too.
+//
+// The REST of auto-entities' matcher is ported here too, because a form that is not understood
+// does not fail loudly — it falls through to the exact-equality test and matches NOTHING. That is
+// how `state: "< 20"` on a low-battery card resolved to zero entities: the string "< 20" was
+// compared with `===` against each entity's state. Ported, in upstream's own order:
+//   "$$…"                 match against JSON.stringify(value), for list/object attributes
+//   "… m|h|d ago"         the value is a timestamp; compare its age in minutes / hours / days
+//   <= >= == != < > ! =   numeric comparison through parseFloat
+//
+// Upstream's quirks are kept rather than corrected — it tests every prefix, so "<= 5" registers
+// both `<=` and `<`, and `"! on"` parses NaN and therefore matches everything. Correcting them
+// here would mean this proxy disagreeing with the card the panel actually renders, and every one
+// of those quirks errs toward including.
+const AGO_SUFFIX_RE = /([mhd])\s+ago\s*$/i;
+const COMPARISONS = [
+  ['<=', (a, b) => a <= b], ['>=', (a, b) => a >= b], ['==', (a, b) => a == b],   // eslint-disable-line eqeqeq
+  ['!=', (a, b) => a != b], ['<', (a, b) => a < b], ['>', (a, b) => a > b],       // eslint-disable-line eqeqeq
+  ['!', (a, b) => a != b], ['=', (a, b) => a == b],                               // eslint-disable-line eqeqeq
+];
+
 export function toMatcher(pattern) {
   if (typeof pattern !== 'string') return (v) => v === pattern;
   const tests = [];
+  const transforms = [];
+  if (pattern.startsWith('$$')) {
+    pattern = pattern.substring(2);
+    transforms.push(JSON.stringify);
+  }
   if ((pattern.startsWith('/') && pattern.endsWith('/') && pattern.length > 1) || pattern.includes('*')) {
     let p = pattern;
     // Glob -> anchored regex. Escape regex metacharacters EXCEPT `*`, which becomes `.*`.
@@ -45,8 +70,25 @@ export function toMatcher(pattern) {
       tests.push((v) => typeof v === 'string' && re.test(v));
     } catch { /* an unparseable regex simply contributes no matches */ }
   }
-  tests.push((v) => v === pattern);
-  return (v) => tests.some((t) => t(v));
+  const ago = AGO_SUFFIX_RE.exec(pattern);
+  if (ago) {
+    pattern = pattern.replace(ago[0], '');
+    const now = Date.now();
+    const per = ago[1].toLowerCase() === 'h' ? 60 : ago[1].toLowerCase() === 'd' ? 60 * 24 : 1;
+    transforms.push((v) => (now - new Date(v).getTime()) / 60000 / per);
+  }
+  for (const [op, cmp] of COMPARISONS) {
+    if (!pattern.startsWith(op)) continue;
+    const want = parseFloat(pattern.substring(op.length));
+    tests.push((v) => cmp(parseFloat(v), want));
+  }
+  const exact = pattern;
+  tests.push((v) => v === exact);
+  return (v) => {
+    const t = transforms.reduce((acc, f) => f(acc), v);
+    if (t === undefined) return false;
+    return tests.some((f) => f(t));
+  };
 }
 
 const asArray = (v) => (Array.isArray(v) ? v : [v]);
