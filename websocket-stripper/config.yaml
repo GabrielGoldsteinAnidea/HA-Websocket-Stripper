@@ -32,6 +32,13 @@ options:
   always_forward: []
   never_forward: []
   strip_entities: true
+  # HA's own websocket negotiates permessage-deflate; the `ws` library does not do so
+  # server-side by default, so putting this add-on in front of HA silently removes compression
+  # from the browser leg. On by default to restore it. Turn off only on very weak hardware
+  # where deflate CPU costs more than the bytes it saves.
+  # Memory: each compressed connection keeps a ~300 KB zlib window (context takeover, the
+  # default). Fine for a few kiosks; budget for it on a large fleet.
+  compress_websocket: true
   port: 8099
   ha_base: ""
   allow_ws_url: ""
@@ -43,6 +50,7 @@ schema:
   never_forward:
     - str
   strip_entities: bool
+  compress_websocket: bool
   port: "int(1,65535)?"
   ha_base: "str?"
   allow_ws_url: "str?"

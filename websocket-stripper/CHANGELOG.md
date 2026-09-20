@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+**Fix: the add-on was removing websocket compression.** Home Assistant's own websocket
+negotiates `permessage-deflate`, but the `ws` library does not enable it server-side by
+default — so putting this proxy in front of HA silently downgraded every kiosk from deflated
+frames to plaintext JSON. Confirmed by comparing the negotiated `Sec-WebSocket-Extensions` on
+HA directly (`permessage-deflate`) against the proxy (nothing).
+
+Now on by default via the new `compress_websocket` option, with a `threshold` so small control
+frames don't pay for it and a `concurrencyLimit` so a burst of reconnecting kiosks can't
+saturate the host. Deflate runs on libuv's threadpool rather than the main loop. Turn it off
+on very weak hardware.
+
 ## 0.2.4 — 2026-09-17
 
 Redirects behind an HTTPS terminator, and the companion app. Both from #9's second report.
