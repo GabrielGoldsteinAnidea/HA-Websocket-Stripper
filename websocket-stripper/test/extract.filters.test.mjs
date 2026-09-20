@@ -142,3 +142,35 @@ describe('group membership expansion (issue #4)', () => {
       ['group.a', 'group.b', 'light.kitchen']);
   });
 });
+
+// A stray list item in the YAML must not cost the whole dashboard its allowlist.
+describe('malformed auto-entities entries', () => {
+  const S = [
+    { entity_id: 'light.desk', state: 'on', attributes: {} },
+    { entity_id: 'sensor.temp', state: '5', attributes: {} },
+  ];
+  const go = (filter) => extractEntities(
+    { views: [{ cards: [{ type: 'custom:auto-entities', filter }] }] }, S, { overInclude: true });
+
+  test('an empty include entry is skipped, not thrown on', () => {
+    // The visual editor writes `- ` as null. This used to throw TypeError out of extractEntities.
+    const got = go({ include: [null, { domain: 'light' }] });
+    assert.deepEqual(got.entities, ['light.desk']);
+    assert.ok(got.unsupported.some((u) => u.includes('not a filter')), got.unsupported);
+  });
+
+  test('an empty exclude entry is skipped too', () => {
+    const got = go({ include: [{ domain: 'light' }], exclude: [null] });
+    assert.deepEqual(got.entities, ['light.desk']);
+  });
+
+  test('a bare entity id in include is taken as that entity', () => {
+    assert.deepEqual(go({ include: ['light.desk'] }).entities, ['light.desk']);
+  });
+
+  test('a number or a nested list is skipped rather than matching everything', () => {
+    const got = go({ include: [42, ['light.desk']] });
+    assert.deepEqual(got.entities, [], 'nothing it cannot read may widen the allowlist');
+    assert.equal(got.unsupported.filter((u) => u.includes('not a filter')).length, 2);
+  });
+});

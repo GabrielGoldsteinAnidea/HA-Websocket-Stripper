@@ -244,10 +244,28 @@ function expandAutoEntities(node, allStates, add, unsupported, ctx, overInclude)
       if (ctx.byId.has(m[0])) add(m[0]);
     }
   }
+  // A condition must be a plain object. The visual editor leaves a bare `-` behind as `null`, and
+  // condTests dereferences it (`cond.domain`) — so ONE empty list item threw out of
+  // extractEntities, buildAllow logged the whole dashboard as FAILED, and that dashboard got no
+  // allowlist at all. With a single dashboard configured it is worse: every rebuild then fails
+  // with "no dashboard config available yet — HA not ready", which points at Home Assistant
+  // rather than at the stray line in the YAML.
+  //
+  // An entry that says nothing is skipped and named in `unsupported`, rather than taken as a
+  // filter that matches everything — which is the direction that would forward the instance.
+  const isCond = (c, role) => {
+    if (c && typeof c === 'object' && !Array.isArray(c)) return true;
+    unsupported.push(`auto-entities ${role} entry that is not a filter (${c === null ? 'empty' : typeof c}) — skipped`);
+    return false;
+  };
   const inc = Array.isArray(f.include) ? f.include : [];
-  const exc = Array.isArray(f.exclude) ? f.exclude : [];
+  const exc = (Array.isArray(f.exclude) ? f.exclude : []).filter((c) => isCond(c, 'exclude'));
   const excMatchers = exc.map((c) => makeMatcher(c, unsupported, ctx, 'exclude', overInclude));
   for (const cond of inc) {
+    // A bare entity id is not a filter upstream either, but if it names a real-looking entity
+    // then forwarding it costs nothing and dropping it blanks a card.
+    if (typeof cond === 'string' && isEntityId(cond)) { add(cond); continue; }
+    if (!isCond(cond, 'include')) continue;
     // An include entry can be an explicit entity rather than a filter.
     if (cond && isEntityId(cond.entity_id) && !String(cond.entity_id).includes('*')) {
       if (!excMatchers.some((m) => m({ entity_id: cond.entity_id, state: '', attributes: {} }))) add(cond.entity_id);
