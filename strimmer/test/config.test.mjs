@@ -394,17 +394,6 @@ test('every boolean option carries a short caption and an icon for its tile', ()
   }
 });
 
-// A caption the panel has no geometry for renders as a tile with a blank space where the glyph
-// should be — which looks like a rendering fault rather than a missing table entry.
-test('every icon the catalogue names has a path in the panel', () => {
-  const src = fs.readFileSync(path.join(DIR, '..', 'config_store.mjs'), 'utf8');
-  const panel = fs.readFileSync(path.join(DIR, '..', 'panel.html'), 'utf8');
-  const table = panel.slice(panel.indexOf('const TILE_ICONS = {'));
-  for (const m of src.matchAll(/icon: '([a-z0-9-]+)'/g)) {
-    assert.ok(table.includes(`'${m[1]}':`), `panel.html has no path for mdi:${m[1]}`);
-  }
-});
-
 // The add-on must START with an options file from an older version still in it.
 //
 // This is the failure that took the add-on down on the one install that mattered: a boot-time

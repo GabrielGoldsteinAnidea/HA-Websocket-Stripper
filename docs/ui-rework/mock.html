@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Strimmer console (mock)</title>
+<style>
+:root{
+  --primary-color:#03a9f4; --link-color:#0277bd; --on-primary:#fff;
+  --primary-background-color:#f4f5f7; --card-background-color:#fff;
+  --primary-text-color:#1f2328; --secondary-text-color:#5f6670;
+  --divider-color:rgba(0,0,0,.12); --chip-bg:rgba(3,169,244,.12);
+  --success-color:#2e7d32; --warning-color:#b26a00; --error-color:#c62828;
+  --switch-off:#9aa0a6; --radius:12px; --shadow:0 1px 2px rgba(0,0,0,.08);
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
+  --link-color:#4fc3f7; --primary-background-color:#111214; --card-background-color:#1c1d20;
+  --primary-text-color:#e3e4e6; --secondary-text-color:#9ca0a6; --divider-color:rgba(255,255,255,.12);
+  --chip-bg:rgba(79,195,247,.16); --success-color:#66bb6a; --warning-color:#ffb74d; --error-color:#ef5350;
+  --switch-off:#6b7076; --shadow:none}}
+:root[data-theme=dark]{
+  --link-color:#4fc3f7; --primary-background-color:#111214; --card-background-color:#1c1d20;
+  --primary-text-color:#e3e4e6; --secondary-text-color:#9ca0a6; --divider-color:rgba(255,255,255,.12);
+  --chip-bg:rgba(79,195,247,.16); --success-color:#66bb6a; --warning-color:#ffb74d; --error-color:#ef5350;
+  --switch-off:#6b7076; --shadow:none}
+*{box-sizing:border-box}
+body{margin:0;background:var(--primary-background-color);color:var(--primary-text-color);
+  font:14px/1.45 Roboto,system-ui,-apple-system,"Segoe UI",sans-serif}
+svg.i{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+header{background:var(--card-background-color);border-bottom:1px solid var(--divider-color);position:sticky;top:0;z-index:5}
+.bar{max-width:880px;margin:0 auto;display:flex;align-items:center;gap:12px;padding:8px 16px;min-height:56px}
+.logo{width:32px;height:32px;border-radius:8px;background:var(--primary-color);color:#fff;display:grid;place-items:center;flex:none}
+.logo svg{width:20px;height:20px}
+h1{font-size:20px;font-weight:500;margin:0;flex:1;min-width:0}
+h1 small{display:block;font-size:12px;font-weight:400;color:var(--secondary-text-color)}
+.ib{width:40px;height:40px;border-radius:50%;border:0;background:none;color:var(--secondary-text-color);display:grid;place-items:center;cursor:pointer}
+.ib:hover{background:var(--chip-bg)} :focus-visible{outline:2px solid var(--primary-color);outline-offset:2px}
+nav{max-width:880px;margin:0 auto;display:flex;overflow-x:auto;padding:0 8px;scrollbar-width:none}
+nav a{padding:12px 14px;color:var(--secondary-text-color);text-decoration:none;font-weight:500;white-space:nowrap;border-bottom:2px solid transparent}
+nav a[aria-current=page]{color:var(--link-color);border-color:var(--primary-color)}
+main{max-width:880px;margin:0 auto;padding:16px;display:grid;gap:16px}
+section[hidden]{display:none}
+section{display:grid;gap:16px}
+.card{background:var(--card-background-color);border-radius:var(--radius);box-shadow:var(--shadow);border:1px solid var(--divider-color);overflow:hidden}
+.card>h2{font-size:16px;font-weight:500;margin:0;padding:16px 16px 4px}
+.card>p.help{margin:0;padding:0 16px 8px;color:var(--secondary-text-color)}
+.row{display:flex;align-items:center;gap:16px;padding:12px 16px;min-height:56px;border-top:1px solid var(--divider-color);width:100%;text-align:left;background:none;border-left:0;border-right:0;border-bottom:0;color:inherit;font:inherit}
+.card>h2+.row,.card>p.help+.row{border-top:0}
+button.row{cursor:pointer} button.row:hover{background:var(--chip-bg)}
+.row .t{flex:1;min-width:0} .row .t b{font-weight:500;display:block;overflow-wrap:anywhere}
+.row .t span{display:block;color:var(--secondary-text-color);font-size:13px}
+.row>svg.i{color:var(--secondary-text-color)}
+.chev{transition:transform .15s} [aria-expanded=true] .chev{transform:rotate(180deg)}
+.detail{padding:4px 16px 16px 56px;color:var(--secondary-text-color);border-top:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px 16px}
+.detail[hidden]{display:none} .detail dt{font-size:12px} .detail dd{margin:0 0 4px;color:var(--primary-text-color)}
+.status{display:flex;gap:16px;align-items:center;padding:20px 16px}
+.status .badge{width:48px;height:48px;border-radius:50%;display:grid;place-items:center;background:color-mix(in srgb,var(--success-color) 16%,transparent);color:var(--success-color)}
+.status.paused .badge{background:color-mix(in srgb,var(--warning-color) 18%,transparent);color:var(--warning-color)}
+.status h2{margin:0;font-size:20px;font-weight:500} .status p{margin:2px 0 0;color:var(--secondary-text-color)}
+.stats{display:grid;grid-template-columns:repeat(4,1fr)}
+.stat{padding:16px;border-left:1px solid var(--divider-color)} .stat:first-child{border-left:0}
+.stat b{display:block;font-size:28px;font-weight:400;line-height:1.1} .stat span{color:var(--secondary-text-color);font-size:13px}
+.good{color:var(--success-color)}
+@media(max-width:620px){.stats{grid-template-columns:1fr 1fr}.stat:nth-child(3){border-left:0}.stat:nth-child(n+3){border-top:1px solid var(--divider-color)}}
+.btn{display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 16px;border-radius:18px;border:1px solid var(--divider-color);background:none;color:var(--link-color);font:500 14px inherit;cursor:pointer;white-space:nowrap}
+.btn.fill{background:var(--primary-color);border-color:var(--primary-color);color:#001e2e}
+.btn:hover{background:var(--chip-bg)} .btn.fill:hover{filter:brightness(1.08)}
+.btn svg.i{width:18px;height:18px}
+.chip{display:inline-block;padding:2px 10px;border-radius:12px;background:var(--chip-bg);color:var(--link-color);font-size:12px;font-weight:500}
+.chip.ok{background:color-mix(in srgb,var(--success-color) 16%,transparent);color:var(--success-color)}
+.chip.warn{background:color-mix(in srgb,var(--warning-color) 18%,transparent);color:var(--warning-color)}
+input[type=search],input[type=text],select{width:100%;height:44px;border-radius:8px;border:1px solid var(--divider-color);background:var(--primary-background-color);color:inherit;font:inherit;padding:0 12px}
+.pad{padding:8px 16px 16px}
+.sw{position:relative;width:36px;height:14px;flex:none;margin:0 4px}
+.sw input{position:absolute;inset:-8px -4px;width:44px;height:30px;opacity:0;margin:0;cursor:pointer;z-index:1}
+.sw i{position:absolute;inset:0;border-radius:7px;background:var(--switch-off);opacity:.5;transition:.15s}
+.sw i::after{content:"";position:absolute;left:-3px;top:-3px;width:20px;height:20px;border-radius:50%;background:var(--switch-off);transition:.15s;box-shadow:0 1px 3px rgba(0,0,0,.3)}
+.sw input:checked+i{background:var(--primary-color);opacity:.5}
+.sw input:checked+i::after{background:var(--primary-color);transform:translateX(20px)}
+.sw input:focus-visible+i{outline:2px solid var(--primary-color);outline-offset:6px}
+details.adv>summary{list-style:none;cursor:pointer;display:flex;gap:16px;align-items:center;padding:14px 16px;font-weight:500}
+details.adv>summary::-webkit-details-marker{display:none}
+details.adv[open]>summary .chev{transform:rotate(180deg)}
+details.adv>summary span{flex:1} details.adv>summary small{font-weight:400;color:var(--secondary-text-color);display:block}
+.field{padding:8px 16px 12px;border-top:1px solid var(--divider-color)} .field label{display:block;font-size:13px;color:var(--secondary-text-color);margin-bottom:4px}
+.tags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.tags .chip{display:inline-flex;gap:4px;align-items:center;font-family:ui-monospace,monospace;font-weight:400}
+.tags button{all:unset;cursor:pointer;opacity:.7;padding:0 2px}
+.row.wrap{flex-wrap:wrap} .row.wrap .t{flex-basis:100%}
+@media(min-width:621px){.row.wrap .t{flex-basis:0}}
+.go{transform:rotate(-90deg)}
+.empty{padding:28px 16px;text-align:center;color:var(--secondary-text-color)}
+.empty svg.i{width:40px;height:40px;opacity:.6}
+.seg{display:inline-flex;border:1px solid var(--divider-color);border-radius:18px;overflow:hidden;margin-left:auto}
+.seg button{border:0;background:none;color:var(--secondary-text-color);padding:6px 14px;font:500 13px inherit;cursor:pointer}
+.seg button[aria-pressed=true]{background:var(--chip-bg);color:var(--link-color)}
+.head{display:flex;align-items:center;gap:8px;padding:12px 16px 4px;flex-wrap:wrap} .head h2{margin:0;font-size:16px;font-weight:500}
+table{border-collapse:collapse;width:100%} th,td{text-align:left;padding:8px 16px;border-top:1px solid var(--divider-color);font-size:13px}
+th{color:var(--secondary-text-color);font-weight:500} td.n{text-align:right;font-variant-numeric:tabular-nums}
+.scroll{overflow-x:auto}
+pre{margin:0;padding:12px 16px;font:12px/1.5 ui-monospace,monospace;overflow:auto;max-height:260px;background:var(--primary-background-color)}
+.snack{position:fixed;left:50%;bottom:16px;transform:translate(-50%,80px);background:#323232;color:#fff;padding:12px 20px;border-radius:8px;transition:.2s;z-index:9;max-width:calc(100vw - 32px)}
+.snack.on{transform:translate(-50%,0)}
+.savebar{position:sticky;bottom:12px;display:flex;gap:12px;align-items:center;padding:12px 16px;border-radius:var(--radius);background:var(--card-background-color);border:1px solid var(--primary-color);box-shadow:0 4px 16px rgba(0,0,0,.2)}
+.savebar[hidden]{display:none} .savebar span{flex:1}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="scissors" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.1 15.9M14.5 14.5 20 20M8.1 8.1 12 12"/></symbol>
+<symbol id="overview" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></symbol>
+<symbol id="monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></symbol>
+<symbol id="tablet" viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M11 18h2"/></symbol>
+<symbol id="phone" viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></symbol>
+<symbol id="gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9 7 7M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></symbol>
+<symbol id="pulse" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
+<symbol id="pause" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 9v6M14 9v6"/></symbol>
+<symbol id="play" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4z"/></symbol>
+<symbol id="down" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 20h16"/></symbol>
+<symbol id="check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></symbol>
+<symbol id="chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+<symbol id="theme" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3v18a9 9 0 0 0 0-18z" fill="currentColor"/></symbol>
+<symbol id="search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+<symbol id="alert" viewBox="0 0 24 24"><path d="M12 3 2 20h20z"/><path d="M12 10v5M12 17.5v.5"/></symbol>
+<symbol id="box" viewBox="0 0 24 24"><path d="m12 3 9 5v8l-9 5-9-5V8z"/><path d="m3 8 9 5 9-5M12 13v8"/></symbol>
+</defs></svg>
+
+<header>
+  <div class="bar">
+    <div class="logo"><svg class="i"><use href="#scissors"/></svg></div>
+    <h1>Strimmer<small>v2026.10.24 · cuts what your panel never shows</small></h1>
+    <button class="ib" id="themeBtn" aria-label="Theme: match system" title="Theme: match system"><svg class="i"><use href="#theme"/></svg></button>
+  </div>
+  <nav aria-label="Sections" id="nav">
+    <a href="#overview">Overview</a><a href="#dashboards">Dashboards</a><a href="#clients">Clients</a><a href="#settings">Settings</a><a href="#diagnostics">Diagnostics</a>
+  </nav>
+</header>
+
+<main>
+<!-- OVERVIEW -->
+<section id="overview">
+  <div class="card status" id="statusCard">
+    <div class="badge"><svg class="i" style="width:28px;height:28px"><use href="#check"/></svg></div>
+    <div style="flex:1;min-width:0"><h2 id="statusTitle">Trimming is on</h2><p id="statusSub">4 panels connected and loading fast. Nothing needs your attention.</p></div>
+    <button class="btn" id="pauseQuick"><svg class="i"><use href="#pause"/></svg><span>Pause</span></button>
+  </div>
+  <div class="card stats">
+    <div class="stat"><b class="good">98.4%</b><span>less data on page load</span></div>
+    <div class="stat"><b>4</b><span>panels connected</span></div>
+    <div class="stat"><b>58 <small style="font-size:14px;color:var(--secondary-text-color)">of 3,630</small></b><span>entities sent</span></div>
+    <div class="stat"><b>97%</b><span>answered from cache</span></div>
+  </div>
+  <div class="card">
+    <div class="head"><h2>Last 24 hours</h2><div class="seg" role="group" aria-label="Metric" id="chartSeg">
+      <button aria-pressed="true" data-m="saved">Data saved</button><button aria-pressed="false" data-m="clients">Panels</button></div></div>
+    <div class="pad"><svg id="chart" viewBox="0 0 600 140" width="100%" height="140" preserveAspectRatio="none" role="img" aria-label="24 hour chart"></svg>
+      <div style="display:flex;justify-content:space-between;color:var(--secondary-text-color);font-size:12px"><span>24 h ago</span><span id="chartPeak">Peak 412 MB per 5 min</span><span>Now</span></div></div>
+  </div>
+  <div class="card">
+    <h2>Worth a look</h2>
+    <button class="row" data-go="dashboards"><svg class="i"><use href="#box"/></svg><div class="t"><b>2 installed cards are used by no dashboard</b><span>HACS modules loading nowhere. Uninstall them, or keep them if they run in the background.</span></div><svg class="i go"><use href="#chev"/></svg></button>
+    <button class="row" data-go="diagnostics"><svg class="i"><use href="#pulse"/></svg><div class="t"><b>Everything else looks fine</b><span>No failed requests in the last hour · Home Assistant link up 6 d 4 h</span></div><svg class="i go"><use href="#chev"/></svg></button>
+  </div>
+</section>
+
+<!-- DASHBOARDS -->
+<section id="dashboards" hidden>
+  <div class="card">
+    <h2>Dashboards served</h2>
+    <p class="help">Each panel only receives the entities its dashboard uses.</p>
+    <div data-acc>
+      <button class="row" aria-expanded="false"><svg class="i"><use href="#monitor"/></svg><div class="t"><b>fridge-status</b><span>31 entities · 4 of 38 cards loaded</span></div><span class="chip ok">Trimmed</span><svg class="i chev"><use href="#chev"/></svg></button>
+      <dl class="detail" hidden><div><dt>Entities</dt><dd>31 of 3,630</dd></div><div><dt>Cards kept</dt><dd>4 · 212 KB</dd></div><div><dt>Cards dropped</dt><dd>34 · 21.4 MB</dd></div><div><dt>Views</dt><dd>fridge-main, weather, audio</dd></div></dl>
+      <button class="row" aria-expanded="false"><svg class="i"><use href="#monitor"/></svg><div class="t"><b>home-status</b><span>44 entities · 9 of 38 cards loaded</span></div><span class="chip ok">Trimmed</span><svg class="i chev"><use href="#chev"/></svg></button>
+      <dl class="detail" hidden><div><dt>Entities</dt><dd>44 of 3,630</dd></div><div><dt>Cards kept</dt><dd>9 · 1.1 MB</dd></div><div><dt>Cards dropped</dt><dd>29 · 20.5 MB</dd></div><div><dt>Views</dt><dd>Home, Home Std, Front Door Camera, Kids Cam</dd></div></dl>
+      <button class="row" aria-expanded="false"><svg class="i"><use href="#monitor"/></svg><div class="t"><b>dashboard-deck</b><span>19 entities · all cards loaded</span></div><span class="chip">Cards untrimmed</span><svg class="i chev"><use href="#chev"/></svg></button>
+      <dl class="detail" hidden><div><dt>Entities</dt><dd>19 of 3,630</dd></div><div><dt>Cards</dt><dd>Card trimming is off in Settings</dd></div></dl>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>A card shows “unavailable”?</h2>
+    <p class="help">Search every entity in Home Assistant and send it to the panels anyway.</p>
+    <div class="pad"><input type="search" id="entQ" placeholder="Search by name or entity id, e.g. porch" autocomplete="off" aria-label="Search entities"></div>
+    <div id="entRes"></div>
+  </div>
+
+  <div class="card">
+    <h2>Unused cards</h2>
+    <p class="help">Installed in Home Assistant but on no dashboard here.</p>
+    <div class="row"><svg class="i"><use href="#box"/></svg><div class="t"><b>bubble-card.js</b><span>148 KB · /hacsfiles/Bubble-Card</span></div><button class="btn" data-toast="Will keep sending bubble-card.js">Keep sending</button></div>
+    <div class="row"><svg class="i"><use href="#box"/></svg><div class="t"><b>weather-chart-card.js</b><span>96 KB · /hacsfiles/weather-chart-card</span></div><button class="btn" data-toast="Will keep sending weather-chart-card.js">Keep sending</button></div>
+  </div>
+</section>
+
+<!-- CLIENTS -->
+<section id="clients" hidden>
+  <div class="card">
+    <div class="head"><h2>Panels and browsers</h2><div class="seg" role="group" aria-label="Range" id="clSeg"><button aria-pressed="true" data-r="live">Connected now</button><button aria-pressed="false" data-r="day">Last 24 h</button></div></div>
+    <div class="pad"><input type="search" id="clQ" placeholder="Filter by name, address or dashboard" aria-label="Filter clients"></div>
+    <div data-acc id="clList"></div>
+    <div class="empty" id="clEmpty" hidden><svg class="i"><use href="#search"/></svg><p>No clients match that filter.</p></div>
+  </div>
+  <details class="card adv"><summary><svg class="i" style="color:var(--secondary-text-color)"><use href="#pulse"/></svg><span>How clients reach Strimmer<small>Direct, reverse proxy, Cloudflare or Ingress</small></span><svg class="i chev"><use href="#chev"/></svg></summary>
+    <table><thead><tr><th>From</th><th>Via</th><th>Hostname</th><th class="n">Connections</th></tr></thead><tbody>
+      <tr><td>Home network</td><td>direct</td><td>strimmer.lan:9123</td><td class="n">312</td></tr>
+      <tr><td>Internet</td><td>cloudflare</td><td>ha.example.com</td><td class="n">41</td></tr>
+      <tr><td>Home network</td><td>ingress</td><td>homeassistant.local</td><td class="n">9</td></tr></tbody></table></details>
+</section>
+
+<!-- SETTINGS -->
+<section id="settings" hidden>
+  <div class="card" id="grpTrim"><h2>What to trim</h2><p class="help">Everything here is safe to leave on. Turn one off if a panel is missing something.</p></div>
+  <div class="card" id="grpExtra"><h2>Extra trimming</h2><p class="help">Saves more, but removes data a few cards might want. Off by default.</p></div>
+  <div class="card" id="grpHome"><h2>Home Assistant integration</h2></div>
+  <div class="card">
+    <h2>Always and never send</h2><p class="help">Entities are literal ids or /regex/. “Never send” always wins.</p>
+    <div class="field"><label>Always send</label><div class="tags" data-list="a"></div><input type="text" placeholder="Add an entity and press Enter" data-add="a" aria-label="Add always-send entity"></div>
+    <div class="field"><label>Never send</label><div class="tags" data-list="n"></div><input type="text" placeholder="Add an entity and press Enter" data-add="n" aria-label="Add never-send entity"></div>
+  </div>
+  <details class="card adv"><summary><svg class="i" style="color:var(--secondary-text-color)"><use href="#gear"/></svg><span>Advanced<small>Ports, addresses, logging and override rules. Most people never need these.</small></span><svg class="i chev"><use href="#chev"/></svg></summary>
+    <div class="field"><label for="f1">Panel port</label><input id="f1" type="text" value="9123"></div>
+    <div class="field"><label for="f2">Console port</label><input id="f2" type="text" value="9122"></div>
+    <div class="field"><label for="f3">Home Assistant address</label><input id="f3" type="text" value="http://homeassistant:8123"></div>
+    <div class="field"><label for="f4">Who can read the panel status endpoint</label><select id="f4"><option>Home network only</option><option>Anyone</option><option>Nobody</option></select></div>
+    <div class="field"><label for="f5">Log detail</label><select id="f5"><option>Warnings only</option><option selected>Normal</option><option>Debug</option></select></div>
+    <div class="row"><div class="t"><b>Override rules</b><span>3 rules · per dashboard, user or device</span></div><button class="btn" data-toast="Rule editor would open here">Edit rules</button></div>
+  </details>
+  <div class="savebar" id="saveBar" hidden><span>Changes apply after a restart.</span><button class="btn" id="revert">Undo</button><button class="btn fill" id="restart">Save and restart</button></div>
+</section>
+
+<!-- DIAGNOSTICS -->
+<section id="diagnostics" hidden>
+  <div class="card">
+    <h2>Troubleshooting</h2>
+    <div class="row"><svg class="i" style="color:var(--link-color)"><use href="#down"/></svg><div class="t"><b>Download diagnostics</b><span>One JSON file for a bug report: settings, stats, recent errors. Addresses and names are masked.</span></div><button class="btn fill" id="dl">Download</button></div>
+    <div class="row wrap"><svg class="i" id="pIcon"><use href="#pause"/></svg><div class="t"><b id="pTitle">Pause trimming</b><span id="pSub">Panels reconnect with everything, so you can see what a card is missing. It resumes by itself.</span></div>
+      <select id="pDur" style="width:auto;height:36px" aria-label="Pause for"><option>15 minutes</option><option>1 hour</option><option>Rest of today</option></select>
+      <button class="btn" id="pBtn">Pause</button></div>
+    <div class="row" style="padding-top:0;border-top:0"><div class="t"><span>Applies to <select id="pWho" style="width:auto;height:30px;display:inline-block"><option>just me</option><option>all administrators</option></select></span></div></div>
+  </div>
+  <div class="card">
+    <h2>Raw data</h2>
+    <details class="adv"><summary><span>What is flowing<small>Every message from Home Assistant by kind</small></span><svg class="i chev"><use href="#chev"/></svg></summary>
+      <div class="scroll"><table><thead><tr><th>Message</th><th class="n">Count</th><th class="n">Size</th></tr></thead><tbody>
+      <tr><td>state_changed events</td><td class="n">18,204</td><td class="n">9.8 MB</td></tr><tr><td>entity_registry/list_for_display</td><td class="n">212</td><td class="n">1.4 MB</td></tr><tr><td>get_states</td><td class="n">212</td><td class="n">310 KB</td></tr></tbody></table></div></details>
+    <details class="adv"><summary><span>Recent errors<small>HTTP failures, kept separately from the log</small></span><svg class="i chev"><use href="#chev"/></svg></summary>
+      <div class="empty"><svg class="i"><use href="#check"/></svg><p>No errors in the last 24 hours.</p></div></details>
+    <details class="adv"><summary><span>stats.json<small>Live snapshot as the API returns it</small></span><svg class="i chev"><use href="#chev"/></svg></summary>
+<pre>{
+  "uptime": "6d 4h",
+  "allowlist": { "union": 58, "instance": 3630 },
+  "savings": { "before": 6291456, "after": 98304, "savedPct": 98.4 },
+  "clients": { "live": 4, "day": 11 },
+  "cache": { "hitRate": 0.97 },
+  "allowlistRebuilds": 14
+}</pre></details>
+  </div>
+</section>
+</main>
+<div class="snack" id="snack" role="status"></div>
+
+<script>
+const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
+function toast(m){const s=$('#snack');s.textContent=m;s.classList.add('on');clearTimeout(toast.t);toast.t=setTimeout(()=>s.classList.remove('on'),2600)}
+// routing
+function route(){const h=(location.hash||'#overview').slice(1);const id=$('#'+h)&&$('main>section#'+h)?h:'overview';
+  $$('main>section').forEach(s=>s.hidden=s.id!==id);$$('#nav a').forEach(a=>a.toggleAttribute('aria-current',a.hash==='#'+id)||a.removeAttribute('aria-current'));
+  $$('#nav a').forEach(a=>a.hash==='#'+id?a.setAttribute('aria-current','page'):a.removeAttribute('aria-current'));requestAnimationFrame(()=>scrollTo(0,0))}
+addEventListener('hashchange',route);route();
+document.addEventListener('click',e=>{const g=e.target.closest('[data-go]');if(g)location.hash=g.dataset.go;
+  const t=e.target.closest('[data-toast]');if(t)toast(t.dataset.toast);
+  const r=e.target.closest('[data-acc]>button.row');if(r){const d=r.nextElementSibling,o=r.getAttribute('aria-expanded')==='true';r.setAttribute('aria-expanded',!o);d.hidden=o}});
+// theme
+const modes=['auto','light','dark'],names={auto:'match system',light:'light',dark:'dark'};let mi=0;
+$('#themeBtn').onclick=()=>{mi=(mi+1)%3;const m=modes[mi];m==='auto'?document.documentElement.removeAttribute('data-theme'):document.documentElement.dataset.theme=m;
+  const l='Theme: '+names[m];$('#themeBtn').title=l;$('#themeBtn').setAttribute('aria-label',l);toast(l)};
+const q=new URLSearchParams(location.search).get('theme');if(q){document.documentElement.dataset.theme=q}
+// chart
+const data={saved:[40,42,38,45,60,80,95,90,70,55,50,48,52,66,88,100,92,75,60,50,46,44,42,40,38,41,60,85,96,88,70,52],
+  clients:[3,3,3,4,4,4,4,4,5,5,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4]};
+function draw(m){const d=data[m],mx=Math.max(...d)*1.1,w=600/(d.length-1);
+  const pts=d.map((v,i)=>`${i*w},${140-v/mx*130}`);
+  $('#chart').innerHTML=`<path d="M0,140 L${pts.join(' L')} L600,140Z" fill="var(--primary-color)" opacity=".18"/><path d="M${pts.join(' L')}" fill="none" stroke="var(--primary-color)" stroke-width="2" vector-effect="non-scaling-stroke"/>`;
+  $('#chartPeak').textContent=m==='saved'?'Peak 412 MB per 5 min':'Most at once: 5'}
+draw('saved');$$('#chartSeg button').forEach(b=>b.onclick=()=>{$$('#chartSeg button').forEach(x=>x.setAttribute('aria-pressed',x===b));draw(b.dataset.m)});
+// clients
+const CL=[['Fridge panel','tablet','192.168.5.41','fridge-status','Samsung tablet · Kiosk Satellite',1,'live','Matched by: dashboard path','31 entities · first data in 0.7 s'],
+['Hallway panel','tablet','192.168.5.57','home-status','Fire tablet',1,'live','Matched by: client rule','44 entities · first data in 0.6 s'],
+['Desk (Chrome)','monitor','192.168.4.12','dashboard-deck','Signed in as david',2,'live','Matched by: dashboard path','19 entities · first data in 0.9 s'],
+['David’s phone','phone','via Cloudflare','home-status','Signed in as david · cellular',1,'live','Matched by: user rule','44 entities · first data in 0.2 s'],
+['Kitchen display','tablet','192.168.5.60','fridge-status','Last seen 3 h ago',1,'day','Matched by: dashboard path','31 entities']];
+function drawCl(){const r=$('#clSeg [aria-pressed=true]').dataset.r,f=$('#clQ').value.toLowerCase();
+  const rows=CL.filter(c=>(r==='day'||c[6]==='live')&&c.join(' ').toLowerCase().includes(f));
+  $('#clList').innerHTML=rows.map(c=>`<button class="row" aria-expanded="false"><svg class="i"><use href="#${c[1]}"/></svg><div class="t"><b>${c[0]}</b><span>${c[3]} · ${c[2]}</span></div><span class="chip ${c[6]==='live'?'ok':''}">${c[6]==='live'?'Connected':'Earlier'}</span><svg class="i chev"><use href="#chev"/></svg></button>
+  <dl class="detail" hidden><div><dt>Device</dt><dd>${c[4]}</dd></div><div><dt>Connections</dt><dd>${c[5]}</dd></div><div><dt>How it was identified</dt><dd>${c[7].replace('Matched by: ','')}</dd></div><div><dt>First load</dt><dd>${c[8]}</dd></div></dl>`).join('');
+  $('#clEmpty').hidden=rows.length>0}
+drawCl();$('#clQ').oninput=drawCl;$$('#clSeg button').forEach(b=>b.onclick=()=>{$$('#clSeg button').forEach(x=>x.setAttribute('aria-pressed',x===b));drawCl()});
+// entities
+const ENT=[['light.porch','Porch light',1],['camera.porch','Porch camera',0],['sensor.porch_temperature','Porch temperature',0],['vacuum.roborock','Robot vacuum',0],['assist_satellite.kitchen','Kitchen satellite',0]];
+$('#entQ').oninput=e=>{const v=e.target.value.toLowerCase().trim();const h=v?ENT.filter(x=>(x[0]+x[1]).toLowerCase().includes(v)):[];
+  $('#entRes').innerHTML=!v?'':h.length?h.map((x,i)=>`<div class="row"><div class="t"><b>${x[1]}</b><span>${x[0]}${x[2]?' · already sent':''}</span></div>${x[2]?'<span class="chip ok">Sent</span>':`<button class="btn" data-pin="${x[0]}">Send always</button>`}</div>`).join(''):'<div class="empty"><svg class="i"><use href="#search"/></svg><p>No entity matches “'+v.replace(/</g,'&lt;')+'”.</p></div>'};
+$('#entRes').onclick=e=>{const b=e.target.closest('[data-pin]');if(b){b.outerHTML='<span class="chip ok">Sent</span>';toast('Added to Always send. Panels pick it up on their next reconnect.')}};
+// settings
+const T=[['grpTrim',[['trim_entities','Entities','Send only what each dashboard uses.',1],['by_dashboard','Per dashboard','Each panel gets only the dashboard it is showing, not all of them.',1],['trim_registries','Device and area lists','Cuts the largest single download on every page load.',1],['trim_resources','Custom cards','Skip HACS cards a dashboard does not use. Pin any that run in the background.',1]]],
+['grpExtra',[['trim_services','Service list','Only the services a panel can use.',0],['trim_themes','Themes','Only the themes your dashboards name.',0],['trim_repairs','Repairs list','Panels never show it, so send it empty.',0],['trim_translations','Translations','Biggest saving, but may leave some labels untranslated.',0]]],
+['grpHome',[['esphome','Show Strimmer in Home Assistant','Adds a device with sensors for saved data, clients and cache hits.',1],['mdns','Announce on the network','Lets Home Assistant find Strimmer by itself.',1],['compress','Compress traffic','Same compression Home Assistant uses on its own websocket.',1]]]];
+for(const[g,items]of T)$('#'+g).insertAdjacentHTML('beforeend',items.map(([k,l,s,on])=>`<label class="row"><div class="t"><b>${l}</b><span>${s}</span></div><span class="sw"><input type="checkbox" role="switch" data-k="${k}" ${on?'checked':''}><i></i></span></label>`).join(''));
+const dirty=()=>$('#saveBar').hidden=false;
+$('#settings').addEventListener('change',dirty);
+let L={a:['switch.porch_lock','/^assist_satellite\\./'],n:['sensor.noisy_power']};
+function tags(){$$('[data-list]').forEach(el=>{const k=el.dataset.list;el.innerHTML=L[k].map((t,i)=>`<span class="chip">${t.replace(/</g,'&lt;')}<button data-rm="${k}${i}" aria-label="Remove ${t}">×</button></span>`).join('')||'<span style="color:var(--secondary-text-color)">None</span>'})}
+tags();document.addEventListener('keydown',e=>{const a=e.target.dataset&&e.target.dataset.add;if(a&&e.key==='Enter'&&e.target.value.trim()){L[a].push(e.target.value.trim());e.target.value='';tags();dirty()}});
+$('#settings').addEventListener('click',e=>{const r=e.target.closest('[data-rm]');if(r){L[r.dataset.rm[0]].splice(+r.dataset.rm.slice(1),1);tags();dirty()}});
+$('#revert').onclick=()=>{$$('#settings input[type=checkbox]').forEach(c=>c.checked=c.defaultChecked);$('#saveBar').hidden=true;toast('Changes undone')};
+$('#restart').onclick=()=>{$('#saveBar').hidden=true;toast('Saved. Restarting Strimmer…')};
+// diagnostics
+let paused=false;
+function setPause(p){paused=p;$('#statusCard').classList.toggle('paused',p);
+  $('#statusTitle').textContent=p?'Trimming is paused':'Trimming is on';
+  $('#statusSub').textContent=p?'Panels are getting everything and will load slowly. Resumes in 15 min.':'4 panels connected and loading fast. Nothing needs your attention.';
+  $('#statusCard .badge use').setAttribute('href',p?'#alert':'#check');
+  $('#pauseQuick span').textContent=p?'Resume':'Pause';$('#pBtn').textContent=p?'Resume':'Pause';$('#pTitle').textContent=p?'Trimming is paused':'Pause trimming';toast(p?'Trimming paused':'Trimming resumed')}
+$('#pBtn').onclick=$('#pauseQuick').onclick=()=>setPause(!paused);
+$('#dl').onclick=()=>{const b=new Blob([JSON.stringify({note:'mock diagnostics',version:'2026.10.24.4',allowlist:{union:58}},null,2)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='strimmer-diagnostics.json';a.click();toast('Diagnostics downloaded')};
+if(location.search.includes('open'))$$('[data-acc]>button.row,details.adv').forEach((x,i)=>i<1&&(x.tagName==='DETAILS'?x.open=true:x.click()));
+</script>
+</body>
+</html>

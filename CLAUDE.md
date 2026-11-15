@@ -113,46 +113,53 @@ Deliberately NOT renamed, and each for a reason a rename would have cost somethi
   resolving without being re-added. References to *GabrielGoldsteinAnidea*/HA-Websocket-Stripper
   are upstream's project and stay as they are, as does the LICENSE copyright.
 
-## The console, Spatial Context and Sextant
+## The console
 
-The console follows the design language of **Spatial Context**
-([Greminn/ha-spatial-context](https://github.com/Greminn/ha-spatial-context), `frontend/src/styles.ts`
-and `views/app-header.ts`), which **Sextant** — the other HA panel in this house — follows too, so
-all three read as one family of tool. Adopted 2026-09-25, replacing an earlier Sextant-only look.
-The rules that define it, all enforced or measured here:
+The console (`strimmer/panel.html`) follows the look of Home Assistant's own settings pages: cards,
+list rows with a secondary line, switches, text-labelled buttons. Five tabs — **Overview**
+(health, four measured numbers, what is not being sent, the pause card, 24h history), **Dashboards**
+(per-dashboard detail, entity search with pinning, resource tuning), **Clients** (accordion rows,
+the Sankey of how clients arrive), **Settings** (the config editor), **Diagnostics** (the
+diagnostics download, what the trim saved, what is flowing, HTTP, runtime).
 
-- **Every button is an icon, named by a tooltip.** No text on any button; the name lives in
-  `data-tip` (shown by one JS-positioned `.tip` element, so the scrolling table wrappers cannot
-  clip it) and in `aria-label` (so it is still announced). Build buttons ONLY with
-  `iconBtn(icon, tip, onclick, cls)`. Text belongs inside a menu someone opened (`.menu-item`) and
-  on config tiles, which are labelled toggles rather than actions. `test/panel_buttons.test.mjs`
-  fails if a button is built anywhere else or has text written into it.
-- **Neutral header**, not an accent bar: the card surface with a 1px divider under it, as a
-  three-column grid (`minmax(0,1fr) auto minmax(0,1fr)` — a bare `1fr` grows to fit the identity
-  block and pushes the tabs off centre). Identity left (full-colour app icon, name, `v<version> ·
-  tagline` subtitle), tabs dead centre in HA's underline style, 48px round icon buttons right.
-  Below 600px the tabs take the leftover space instead, or they run over the action buttons.
-- **Popovers** for anything that is not a single action: pause, theme and the ⋮ menu each open a
-  floating menu of HA-style rows (icon + label, accent fill on the chosen one).
-- HA's own CSS token names, with this panel's short ones aliased onto them; card headings in
-  sentence case, primary text, 16px/500.
+**Reworked 2026-11-05.** Before this it copied Spatial Context's / Sextant's language (every button
+an icon with a tooltip, a three-column header, a tile grid, popovers for pause and ⋮, a sortable
+clients table). That was dropped on purpose and the reasons are the point of this section:
+icon-only buttons were learnable only by hovering, which a phone cannot do; tiles hid what a setting
+does behind a one-word caption; a popover hid the pause duration/scope choices; a 12-column table
+does not fit a phone. The design mock and its rationale are in `docs/ui-rework/`. Do not put these
+back without that argument being answered. **Spatial Context and Sextant are not the reference any
+more; HA's settings UI is.**
 
-The constraint behind every such decision: **Spatial Context and Sextant are NATIVE panels and this
-console is an Ingress iframe.** They inherit the user's theme and have HA's web components; the
-iframe inherits nothing and has none of them. So a rule is copied by reproducing its VALUES, not by
-importing its mechanism — tokens are defined locally, glyphs are MDI paths masked in the button's
-colour (`ICONS`), the tooltip is our own element, and the app icon is `assets/icon.svg` inlined as a
-data URI (its internal ids must not collide with the page). Do not "fix" any of that to
-`<ha-icon>` or `<ha-tooltip>`; they would render nothing.
-
-**Config tab shape, and why:** every boolean is hoisted out of its section into one tile grid at
-the top headed **Strimmers** (accent-filled = on — "blue means on in this language"), and only
-options that hold a VALUE stay in their sections. A tile is right for on/off and wrong for text, so
-do not tile the lists. A section left with nothing but hoisted booleans is SKIPPED rather than
-drawn empty, which is why `SECTIONS` still declares Trimming and Websocket but the page shows
-neither. Each boolean's wording comes from `OPTIONS[key].short` — one source, so the status pill
-and the tile cannot drift (six of twelve had, before `.3`). A tile the console owns carries a dot,
-and the line under the grid hands it back — rows had that control, tiles lost it for five days.
+What still holds, and is enforced:
+- **Buttons carry text.** Build them ONLY with `btn(label, onclick, cls, icon)`. A glyph-only
+  `iconBtn(icon, label, onclick)` is allowed for universal glyphs (theme switch, remove ×, delete) and
+  must carry `aria-label` + `title`. `test/panel_buttons.test.mjs` fails on an unnamed button, on a
+  button built elsewhere, and on text assigned into a button afterwards.
+- **The constraint behind every decision: this console is an Ingress iframe.** It inherits no theme and
+  has no HA web components. So HA's look is copied by reproducing VALUES: tokens are defined locally and
+  aliased to HA's names (light = HA default, dark = HA dark, chosen by `prefers-color-scheme` or the
+  header switch), glyphs are MDI paths masked in the element's colour (`ICONS`), the app icon is
+  `assets/icon.svg` inlined as a data URI. Do not "fix" any of that to `<ha-icon>`; it renders nothing.
+- **Honest numbers only.** The old "98.4% less data" headline cannot be computed: the entity event
+  stream is cut at the source, so what it WOULD have been is never seen. Overview shows
+  `savings.savedPct` labelled "Payload not sent (measured)" — before/after bytes on the answers the
+  proxy actually trims — plus entities sent, clients open and the registry cache hit rate. Add a figure
+  only if `/stats.json` measures it.
+- **Viewer rules.** `VIEWER = { ingress, admin }` from `s.viewer`. `/config.json`, `/access.json`,
+  `/history.json`, `/diagnostics.json` and `/entities.json` are Ingress-only (403 elsewhere; the
+  `forbidden` set remembers it). Pause, pins, config and the diagnostics download need an administrator
+  and are hidden, not shown-and-refused, for anyone else. Untrusted wire data goes in through
+  `textContent` (`h()`), never `innerHTML`.
+- **There is no restart button.** The proxy cannot restart its own app. A save whose note says
+  "restart" shows a notice telling the person to do it from the app's page.
+- **Settings shape:** every boolean is a switch row (caption from `OPTIONS[key].short`, one source),
+  grouped What to trim / Extra trimming / Discovery & network; lists are chip editors under "What to
+  send"; override rules and the remaining value options sit behind **Advanced**. A switch the console
+  owns carries a dot and a "Use add-on setting" line hands it back (`configSwitch`, `handBack`).
+  `config.test.mjs` still needs `s.optionSections` and the `inTrim` line in the panel.
+- **`localStorage`:** keys keep the `stripper-` prefix (`stripper-theme`, `stripper-tab`). The old
+  `stripper-clcols` (clients column picker) is no longer read or written.
 
 **The `hidden` attribute loses to any author `display` rule.** Every element this page toggles
 with `.hidden` needs a matching `[hidden] { display: none }` if its class sets `display` — the

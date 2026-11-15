@@ -54,7 +54,7 @@ describe('what the network may read', () => {
   after(async () => { proxy?.kill(); await mock?.close(); });
 
   it('refuses every identity-bearing read that did not come through Ingress', async () => {
-    for (const p of ['/access.json', '/entities.json', '/devices.json', '/config.json', '/history.json']) {
+    for (const p of ['/access.json', '/entities.json', '/devices.json', '/config.json', '/history.json', '/diagnostics.json']) {
       const res = await req(sp, p);
       assert.equal(res.status, 403, `${p} must not be readable from the network`);
       assert.match(res.body, /Ingress/, `${p} must say why`);
@@ -62,10 +62,20 @@ describe('what the network may read', () => {
   });
 
   it('still serves all of them through Ingress', async () => {
-    for (const p of ['/access.json', '/entities.json', '/devices.json', '/config.json', '/history.json']) {
+    for (const p of ['/access.json', '/entities.json', '/devices.json', '/config.json', '/history.json', '/diagnostics.json']) {
       const res = await req(sp, p, { headers: ING });
       assert.equal(res.status, 200, `${p} must still work for the console`);
     }
+  });
+
+  it('diagnostics is a download, lists the allowlist per dashboard and carries no credentials', async () => {
+    const res = await req(sp, '/diagnostics.json', { headers: ING });
+    assert.match(res.headers['content-disposition'], /attachment/);
+    const d = JSON.parse(res.body);
+    assert.ok(d.version && d.node);
+    assert.ok(Array.isArray(d.allowlist.byDashboard['test-dash']));
+    assert.ok(d.dashboards['test-dash'], 'the dashboard config is included');
+    assert.ok(!/"(ha_token|supervisor_token)"\s*:\s*"(?!\[redacted\])/i.test(res.body));
   });
 
   // /access.json is the one that carried credentials, so it gets its own test naming them.

@@ -13,6 +13,12 @@ configuration:
       entities behind a Voice Satellite card, and any entity that panel-side JavaScript
       READS. JavaScript that only writes an entity does not need this, because callService
       resolves on the server.
+  always_forward_device_class:
+    name: Always forward these device classes
+    description: >-
+      Forward every entity whose device_class matches, for cards that scan all states at runtime
+      (battery lists, window-rose cards). Write battery, or sensor:battery to limit it to one
+      domain. Matched against live state at each rebuild.
   never_forward:
     name: Never forward these entities
     description: >-

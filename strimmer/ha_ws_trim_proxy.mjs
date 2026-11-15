@@ -316,6 +316,21 @@ function parseRules(v) {
   });
 }
 const ALWAYS = parseRules(OPT.always_forward ?? process.env.ALWAYS_FORWARD);
+// `battery` or `sensor:battery`: forward every entity whose device_class matches. For cards that
+// discover entities by scanning hass.states at runtime, which no config walk can predict. Matched
+// against live state at each rebuild, so a newly added battery sensor joins on the next one.
+const CLASS_RULES = toList(OPT.always_forward_device_class ?? process.env.ALWAYS_FORWARD_DEVICE_CLASS)
+  .map((t) => { const [a, b] = t.toLowerCase().split(':'); return b === undefined ? { cls: a } : { dom: a, cls: b }; });
+let CLASS_IDS = new Set();   // set by each build, read by applyOverrides
+function deviceClassIds(states) {
+  const out = new Set();
+  if (!CLASS_RULES.length) return out;
+  for (const s of states) {
+    const cls = s.attributes?.device_class;
+    if (cls && CLASS_RULES.some((r) => r.cls === cls && (!r.dom || s.entity_id.startsWith(`${r.dom}.`)))) out.add(s.entity_id);
+  }
+  return out;
+}
 // Set by the control connection once it is up. Lets the stats panel ask for a rebuild after
 // pinning something, so a pin takes effect immediately instead of waiting for a restart.
 //
@@ -948,6 +963,7 @@ function applyOverrides(set, realIds, dash = null) {
     if (r.literal) out.add(r.literal);
     else realIds.forEach((eid) => { if (r.re.test(eid)) out.add(eid); });
   });
+  CLASS_IDS.forEach((eid) => out.add(eid));
   [...out].forEach((eid) => {
     if (matchesAny(NEVER, eid) || matchesAny(extra.never, eid)) out.delete(eid);
   });
@@ -1035,6 +1051,8 @@ async function buildAllowOnce(rpc, renderTemplate) {
   const states = await rpc({ type: 'get_states' });
   const realIds = states.map((s) => s.entity_id);
   REAL_IDS = realIds;
+  CLASS_IDS = deviceClassIds(states);
+  if (CLASS_RULES.length) report(`  device_class rules forward ${CLASS_IDS.size} entities`);
   // The control connection asks for every state by definition, so this is the instance size.
   // Do NOT learn it from a browser's get_states instead: the modern frontend subscribes
   // rather than polling, so that path can go a whole uptime without ever firing.
@@ -1132,6 +1150,7 @@ async function buildAllowOnce(rpc, renderTemplate) {
       const c0 = performance.now();
       const set = allowlistFor(cfg, states, registries, tpls);
       const cMs = performance.now() - c0;
+      DASH_CONFIGS.set(p, cfg);
       if (BUILD_DASH) {
         BUILD_DASH.ms += cMs;
         if (cMs > BUILD_DASH.slowestMs) { BUILD_DASH.slowestMs = cMs; BUILD_DASH.slowest = p; }
@@ -1150,7 +1169,7 @@ async function buildAllowOnce(rpc, renderTemplate) {
       })(cfg);
       themesByDash.set(p, dashThemes);
       set.forEach((e) => union.add(e));
-    } catch (e) { failed++; log(`  ${p}: FAILED ${e.message}`); }
+    } catch (e) { failed++; DASH_CONFIGS.delete(p); log(`  ${p}: FAILED ${e.message}`); }
   }
   THEMES_USED = themesUsed;
   // Any failure at all is worth naming the alternatives for: `config_not_found` means the
@@ -3039,6 +3058,42 @@ let THEMES_USED = new Set();
 
 // Entities a client has told us it needs, by naming itself. Strictly additive: it can only ever
 // widen an allowlist, never narrow one.
+// Entity ids a panel NAMED in a request that the allowlist did not forward, per dashboard:
+// history, statistics and service calls carry ids to HA untouched, so this is the one place a card
+// reading something the allowlist missed shows up. Bounded: 50 dashboards x 200 ids.
+const ASKED_NOT_FORWARDED = new Map();   // dash -> Map(entity_id -> count)
+const ENTITY_ID_RE = /^[a-z0-9_]+\.[a-z0-9_]+$/;
+function noteAsked(dash, m, allow) {
+  const raw = [m.entity_ids, m.entity_id, m.statistic_ids, m.target?.entity_id, m.service_data?.entity_id].flat(2);
+  for (const id of raw) {
+    if (typeof id !== 'string' || id.length > 255 || !ENTITY_ID_RE.test(id) || allow.has(id)) continue;
+    const key = dash ?? '(union)';
+    let per = ASKED_NOT_FORWARDED.get(key);
+    if (!per) {
+      if (ASKED_NOT_FORWARDED.size >= 50) return;
+      per = new Map(); ASKED_NOT_FORWARDED.set(key, per);
+    }
+    if (per.has(id) || per.size < 200) per.set(id, (per.get(id) || 0) + 1);
+  }
+}
+// The dashboard configs the last build read, kept for the diagnostics bundle.
+const DASH_CONFIGS = new Map();
+// Credentials a config or option can carry. Matched on the KEY, so a new card's `api_key:` is covered.
+const SECRET_KEY_RE = /token|password|passwd|secret|api[_-]?key|authorization|webhook|(^|_)key$/i;
+// Credentials also ride inside ordinary values: a URL's userinfo, a `?token=` in an image address.
+function redactString(v) {
+  return v.replace(/(\/\/)[^/\s@]*@/g, '$1[redacted]@')
+    .replace(/([?&;](?:[^=&\s]*(?:token|password|passwd|secret|api[_-]?key|authorization|key|sig|signature))=)[^&\s"']*/gi, '$1[redacted]');
+}
+// Past the depth cap the subtree is replaced, never passed through: it could hold a credential.
+function redactDeep(v, depth = 0) {
+  if (typeof v === 'string') return redactString(v);
+  if (v == null || typeof v !== 'object') return v;
+  if (depth > 40) return '[truncated]';
+  if (Array.isArray(v)) return v.map((x) => redactDeep(x, depth + 1));
+  return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, SECRET_KEY_RE.test(k) ? '[redacted]' : redactDeep(x, depth + 1)]));
+}
+
 function learnedFor(ip) {
   const hit = ip ? clientLearned.get(ip) : null;
   // Entries are refreshed by every announce (satellites repeat every 30s), so one that has gone a
@@ -4042,7 +4097,10 @@ function bridge(browserWs, baseAllow = ALLOW, dash = null, meta = {}) {
       if (kind === 'services') serviceIds.set(m.id, ALLOW_VERSION); else registryIds.set(m.id, { kind, ver: ALLOW_VERSION });
       return s;
     };
-    sendOrQueue(stampAllow
+    // Noted when the thunk RUNS, not on receipt: a held message is judged against the allowlist
+    // the user rules have settled, and a paused connection is not judged at all.
+    const noted = (thunk) => () => { if (trimming && m && typeof m === 'object') noteAsked(dash, m, allow); return thunk(); };
+    sendOrQueue(noted(stampAllow
       ? () => {
         if (!trimming) { subEntityIds.delete(m.id); return s; }   // a pause landed while this was held
         // Belt-and-braces to the upgrade gate: an empty entity_ids is NOT "subscribe to
@@ -4059,7 +4117,7 @@ function bridge(browserWs, baseAllow = ALLOW, dash = null, meta = {}) {
         return JSON.stringify(m);
       }
       : cacheKind ? cachedOrForward(cacheKind)
-      : () => s);
+      : () => s));
   });
 
   // ---- per-connection helpers for the HA -> browser path ----
@@ -4740,6 +4798,7 @@ function effectiveFallback() {
     dashboards: DASH_PATHS,
     always_forward: toList(process.env.ALWAYS_FORWARD),
     never_forward: toList(process.env.NEVER_FORWARD),
+    always_forward_device_class: toList(process.env.ALWAYS_FORWARD_DEVICE_CLASS),
     exclude_device_categories: EXCLUDE_DEVICE_CATEGORIES,
     resources_always_forward: toList(process.env.RESOURCES_ALWAYS_FORWARD),
     resources_never_forward: toList(process.env.RESOURCES_NEVER_FORWARD),
@@ -5284,6 +5343,31 @@ const statsServer = http.createServer(async (req, res) => {
     const limit = Math.min(Number(new URL(req.url, 'http://x').searchParams.get('limit')) || 100, 500);
     const body = JSON.stringify(httpLog.snapshot({ limit }), null, 2);
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    return res.end(body);
+  }
+  if (path.endsWith('/diagnostics.json')) {
+    // One file a user can attach to a bug report. Admin-only because it carries dashboard configs
+    // and entity ids; credentials are stripped by key, but the note below says to look anyway.
+    if (requireIngress(req, res, '/diagnostics.json')) return;
+    if (!(await callerMayAdminister(req))) return refuseNotAdmin(res, 'download diagnostics');
+    const body = JSON.stringify({
+      note: 'Generated by Strimmer. Credentials are removed by key name; read this before you post it.',
+      generated: new Date().toISOString(),
+      version: VERSION,
+      node: process.version,
+      options: redactDeep({ ...effectiveFallback(), ...OPT }),
+      allowlist: {
+        union: ALLOW.size,
+        byDashboard: Object.fromEntries([...ALLOW_BY_DASH].map(([d, set]) => [d, [...set].sort()])),
+      },
+      askedButNotForwarded: Object.fromEntries([...ASKED_NOT_FORWARDED].map(([d, per]) => [d, Object.fromEntries(per)])),
+      dashboards: redactDeep(Object.fromEntries(DASH_CONFIGS)),
+      stats: redactForNetwork(stats.snapshot(statsExtras())),
+    }, null, 2);
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store',
+      'content-disposition': 'attachment; filename="strimmer-diagnostics.json"',
+    });
     return res.end(body);
   }
   if (path.endsWith('/history.json')) {

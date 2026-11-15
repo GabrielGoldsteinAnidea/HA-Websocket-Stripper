@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- **Console rework.** Five tabs (Overview, Dashboards, Clients, Settings, Diagnostics) in Home Assistant's
+  settings style: cards, list rows, switches, text buttons, a pause card with duration and scope, and
+  advanced options collapsed. Every function of the old console is still there. Changed on purpose:
+  buttons now say what they do instead of being icons with tooltips; the clients table and its column
+  picker are replaced by expandable rows (the `stripper-clcols` browser setting is no longer used);
+  the headline is **payload not sent (measured)** rather than an unverifiable percentage, with
+  entities sent, clients and cache hits beside it; entity search now says why an entity is or is not
+  sent. Settings that need a restart show a notice (there is still no restart button). The tab bar
+  scrolls at phone width.
+- **`always_forward_device_class`** (add-on options and the console's Config tab): forward every entity of a
+  device class (`battery`, or `sensor:battery`), for cards that scan all states at runtime and so name
+  nothing the allowlist can find. Matched against live state at each rebuild.
+
+- **Download diagnostics** (Diagnostics tab, administrators only): one JSON file with the version, redacted
+  options, the allowlist per dashboard, the dashboard configs (credentials removed by key name), the
+  entity ids panels asked for that were not forwarded, and the stats. Attach it to a bug report.
+
 ## 2026.11.02.1 — 2026-11-02
 
 Fixes from a performance and stability review, plus the extractor gaps found chasing issue #19:

@@ -132,6 +132,7 @@ export const OPTIONS = {
   // Dashboards and entities
   dashboards: { type: 'list', section: 'entities', label: 'Dashboards to serve' },
   always_forward: { type: 'list', section: 'entities', label: 'Always forward these entities' },
+  always_forward_device_class: { type: 'list', section: 'entities', label: 'Always forward these device classes' },
   never_forward: { type: 'list', section: 'entities', label: 'Never forward these entities' },
   exclude_device_categories: { type: 'list', section: 'entities', label: 'Drop these entity categories' },
 

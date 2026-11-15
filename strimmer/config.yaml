@@ -50,6 +50,7 @@ options:
   dashboards: []
   always_forward: []
   never_forward: []
+  always_forward_device_class: []
   trim_entities: true
   # Serve each connection only the dashboard it is actually viewing, instead of the union of
   # every dashboard listed above. A panel showing one dashboard stops paying for the others.
@@ -138,6 +139,8 @@ schema:
   always_forward:
     - str
   never_forward:
+    - str
+  always_forward_device_class:
     - str
   trim_entities: bool
   # The original name for trim_entities. Still accepted so an existing config keeps working.

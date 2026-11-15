@@ -30,6 +30,7 @@ still read. See [docs/MIGRATING.md](../docs/MIGRATING.md) for what was renamed a
 | `dashboard_overrides` | list | Per-**dashboard** always/never lists. The global lists above are right for something every dashboard needs and wrong for something only one needs, because every panel then pays for it. Each entry takes a `dashboard` (its `url_path`) plus its own `always_forward` / `never_forward`, same syntax as the global lists. The global `never_forward` still wins last. |
 | `user_overrides` | list | Per-**user** always/never lists — the one thing per-dashboard rules cannot express: two people opening the *same* dashboard who should not be served the same entities. Give the user's name as shown in Settings → People (or their user id). Add `dashboard` to scope a rule to one dashboard, so "David sees `update.*` on lovelace" does not follow him onto a wall panel. Identity comes from the browser's own access token, resolved once per session against `auth/current_user`. **Cost:** a connection that a rule *could* match is held until the user resolves. Connections whose dashboard no rule is scoped to skip the lookup entirely, so scoping your rules is also a speed optimisation. Leave this empty and no lookup ever happens. |
 | `client_overrides` | list | Per-**device** always/never lists, pinned to a physical client rather than to a dashboard or a user. Some entities belong to the machine in front of you, not to the page it happens to be showing — a browser-based voice satellite is the clearest case, where the satellite's entities are only ever useful to the one panel that *is* that satellite. A dashboard rule gets that wrong both ways: the panel loses them when it navigates elsewhere, and every other client opening that dashboard pays for them. Each entry takes a `client` — an IP, an IPv4 CIDR (`10.2.4.0/24`), or a hostname — plus `devices` and/or `always_forward` / `never_forward`. `devices` names whole **devices** by registry name or id and pulls in every entity that device owns, which keeps working when an integration adds entities in a later release. Hostnames resolve when the allowlist is built, so a moved DHCP lease is picked up on the next rebuild; note mDNS/`.local` names generally do **not** resolve from inside a container, so use a real DNS record. |
+| `always_forward_device_class` | list | Empty by default. Forward every entity whose `device_class` matches, for cards that scan all states at runtime (a battery list, a window-rose) and so name nothing a config walk can find. Write `battery`, or `sensor:battery` to limit it to one domain. Matched against live state at every rebuild, so a new battery sensor joins on the next one. Over-includes by design; settable in the console's Config tab too. |
 | `exclude_device_categories` | list | Empty by default. When a **device** is expanded — by a card configured with a device rather than entities, or by a `client_overrides` rule — drop entities Home Assistant labels `config` (controls that configure the device: panel brightness, a reset button, a firmware update) or `diagnostic` (readings about its health: last seen, signal, status code). A litter robot carries 21 entities and a card rendering a fill level needs a handful. **Empty on purpose:** whether a given card renders a diagnostic sensor is not knowable from here, and a wrongly dropped entity blanks part of a card with no error anywhere. Every device expansion logs its split — `+21 entities (8 primary, 7 config, 6 diagnostic)` — so decide with the real numbers for *your* devices in front of you. Note a browser voice satellite measured 18 of 21 entities as `config`, because its pipeline and wake-word selects are configuration controls that the page's JavaScript nonetheless reads to work. |
 | `resources_always_forward` | list | URL patterns (literal substring, or `/regex/`) always sent. Needed for plugins that patch the frontend instead of registering a card — they contain none of the dashboard's card names, so the content match cannot tell they're used. In practice: icon packs, and anything that restyles core cards. A module with its own top-level config block on the dashboard (`kiosk_mode:`, `swipe_nav:`) is detected from that block and does not need listing. |
 | `resources_never_forward` | list | URL patterns never sent to any dashboard. Wins over `resources_always_forward`. |
@@ -209,24 +210,25 @@ The app registers an Ingress panel, so there is a **Strimmer** entry in the Home
 sidebar. (If it is missing, turn on *Show in sidebar* on the app's own page — Supervisor
 stores that flag per install and leaves it off for apps that gained Ingress in an update.)
 
-It shows:
+It has five tabs:
 
-- **clients connected now** — address, which dashboard each was attributed to and how, how
-  many entities it is subscribed to, and its live update throughput;
-- **what got trimmed** — per payload, the size Home Assistant sent, the size the browser
-  received, and the difference;
-- **per-dashboard** entity counts against the size of the instance, and resource kept/dropped
-  figures when `trim_resources` is on;
-- **the last 24 hours** — data not sent, clients connected, and update traffic, as charts;
-- **how clients reach this** — a flow diagram from where each client was, through how it
-  arrived (direct, a reverse proxy, Cloudflare, Ingress), to the hostname it dialled.
+- **Overview** — whether anything needs attention, four measured numbers (payload not sent,
+  entities sent, clients open, registry cache hits), what is not being sent, the **pause** card, and
+  the last 24 hours as charts;
+- **Dashboards** — each dashboard's entity count against the instance, an **entity search** that
+  says whether an entity is sent and lets you pin it, and resource kept/dropped figures;
+- **Clients** — who is connected now or in the last 24 hours (open a row for its detail), and a flow
+  diagram from where each client was, through how it arrived, to the hostname it dialled;
+- **Settings** — every option, as switches and lists (below);
+- **Diagnostics** — the diagnostics download, what the trim saved, what is flowing, HTTP, runtime.
 
-It is drawn in Home Assistant's own colours and type. Ingress passes none of HA's theme into the
-frame, so the page can only follow the operating system — a dark HA on a light desktop would get
-a light panel in a dark frame. The **Auto / Light / Dark** control in the header pins it, per
-browser. The Clients table hides its six diagnostic columns on a narrow screen; **All columns**
-in the card heading shows them, and the choice is remembered. Anything the console changes
-reports the outcome in a snackbar at the bottom of the screen.
+"Payload not sent" is measured on the answers the app knows how to shrink (before and after
+bytes). It is not a comparison with an untrimmed run: the entity stream is cut at the source, so its
+untrimmed size is never seen and no such figure is shown.
+
+It follows Home Assistant's settings look. Ingress passes none of HA's theme into the frame, so the
+page follows the operating system; the header button cycles **Auto / Light / Dark** and is
+remembered per browser. Anything the console changes reports the outcome in a snackbar.
 
 Two JSON endpoints back it, both read-only:
 
@@ -251,32 +253,19 @@ sensor:
 
 Options can be changed from the console instead of the add-on's Configuration tab.
 
-**Everything that is on or off is one grid at the top, headed Strimmers** — twelve icon tiles,
-filled blue for on and outlined for off, so "what is this app currently doing to my dashboards"
-is a glance rather than a scroll. A tile's caption has room for about a word; its tooltip carries
-the full sentence and the option's config key. Three of the twelve — mDNS, metrics and compression —
-are not trims; they are in the grid because the question the grid answers is *what is switched
-on*, not *what is cut*.
+**Everything that is on or off is a switch**, in three groups (what to trim, extra trimming, discovery
+and network), each with a line saying what it does. Lists (dashboards, always/never forward, resources)
+are chips you add and remove under **What to send**. **Advanced** holds the override rules and the
+remaining value options.
 
-**Everything that holds a value keeps its section below**: Dashboards and entities, Custom cards,
-Overrides, Device discovery, Monitoring, Panel status API. Lists are their items with a remove
-button and an add box, and the override rules get a list and a wizard rather than a YAML block.
-Every row shows what the option actually resolved to, so an option nothing has set reads as its
-default rather than as blank.
-
-There is no *Trimming* or *Websocket* heading, which the sections list in older versions of this
-page had: both held nothing but switches, and a section with nothing left to set is skipped rather
-than drawn over empty space. Their options are all in the grid.
-
-This exists because the add-on's options have outgrown what a Supervisor schema can express:
-nested groups do not render in the Configuration tab at all, sub-options cannot carry
-descriptions, and there is no validation beyond types.
+An option whose change needs a restart says so after you save it. There is no restart button here:
+restart the app from its page under Settings → Apps.
 
 **Ownership is per option.** An option is read from the console only when someone has deliberately
 changed it there; everything else still comes from the add-on's Configuration tab and still works
-exactly as before. A row marked **set here** is owned by the console, and the Configuration tab no
+exactly as before. A switch or row marked **set here** is owned by the console, and the Configuration tab no
 longer applies to it. Taking a setting over never changes it — it is seeded from whatever is
-already in effect — and **Use add-on config** hands it back.
+already in effect — and **Use add-on setting** hands it back.
 
 Options are read once at startup, so a change takes effect on the next restart.
 
@@ -292,11 +281,21 @@ search as you type — and still accept anything typed, because an `always_forwa
 routinely a `/regex/`, which no list of entity ids can suggest. Deleting a rule takes two clicks,
 since the rows look alike and the deletion cannot be undone from the console.
 
+### Download diagnostics
+
+The ⋮ menu has **Download diagnostics** (administrators only). It saves `strimmer-diagnostics.json`: the
+version, your options, the allowlist per dashboard, the dashboard configs, entity ids a panel asked
+for that were not forwarded, and the stats. Credentials are removed by key name, but read the file
+before you post it.
+
+**Editing cards through Strimmer:** the editor's entity pickers only list entities that were
+forwarded, so edit dashboards on the untrimmed Home Assistant address.
+
 ### Pausing the trim while you troubleshoot
 
 The add-on serves a panel only the entities its dashboard names, which is exactly wrong when you
 are trying to find out why something is broken: an entity no card mentions is not there to look
-at. **Pause trimming** in the console's status strip turns it off for **one hour** or for the
+at. **Pause trimming** on the console's Overview tab turns it off for **one hour** or for the
 **rest of the day**, and it ends by itself.
 
 It pauses for a **Home Assistant user**, not a browser or an address:
@@ -332,7 +331,7 @@ switch cannot know who flipped it. Administrators is the scope that matches the 
 troubleshoots, and **every kiosk and wall panel keeps its trim** and is never disturbed. The switch
 returns to `on` by itself when the hour is up. `ADMIN_PAUSE_MINUTES` (env) changes the span.
 
-The console offers the same thing under **pause trimming → all admins, 1 hour**, so the two paths
+The console offers the same thing under **Pause trimming → All administrators**, so the two paths
 are one feature.
 
 ### Publishing the metrics to Home Assistant
