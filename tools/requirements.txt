@@ -2,5 +2,5 @@
 # workflows. Pinned exactly so Dependabot (the `pip` entry in .github/dependabot.yml) proposes
 # every bump as a PR, rather than CI drifting to a new release, with new rules, on an unrelated push.
 pillow==13.0.0
-ruff==0.16.10
-zizmor==1.30.1
+ruff==0.17.4
+zizmor==1.32.0
