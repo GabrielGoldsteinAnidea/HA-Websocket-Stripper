@@ -596,6 +596,40 @@ describe('backpressure from a browser that is not reading', () => {
   });
 });
 
+// #3: closing the bridge used to send a close FRAME to an HA socket paused by backpressure. The
+// paused socket never reads the reply, so the HA leg lingered for ws's 30s close timeout. Its own
+// proxy, with a long stall window, so the browser leaving is the only thing that closes the bridge.
+describe('a paused HA socket when its browser leaves', () => {
+  let mock, proxy, port;
+  before(async () => {
+    mock = await startMockHa();
+    port = await getFreePort();
+    proxy = spawnProxy({ mock, dashPaths: 'test-dash', port,
+      extraEnv: { BACKPRESSURE_HIGH_BYTES: String(256 * 1024), BACKPRESSURE_STALL_MS: '60000', LOG_LEVEL: 'debug' } });
+    await proxy.waitForLog(READY);
+  });
+  after(async () => { proxy.kill(); await mock.close(); });
+
+  it('is destroyed at once', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/websocket`);
+    ws.on('error', () => {});
+    await new Promise((res) => ws.on('open', res));
+    await new Promise((res) => ws.on('message', (raw) => {
+      const m = JSON.parse(raw.toString());
+      if (m.type === 'auth_required') ws.send(JSON.stringify({ type: 'auth', access_token: 'test-token' }));
+      if (m.type === 'auth_ok') res();
+    }));
+    ws.pause();
+    const bigFrame = JSON.stringify({ type: 'pong', pad: crypto.randomBytes(150 * 1024).toString('base64') });
+    for (let i = 0; i < 60; i++) { mock.sendRaw(bigFrame); await delay(5); }
+    await proxy.waitForLog(/pausing its HA stream/, 10000);
+    const before = mock.mainSocketCount();             // the bridge plus the proxy's control socket
+    ws.terminate();
+    for (const end = Date.now() + 5000; mock.mainSocketCount() >= before && Date.now() < end;) await delay(100);
+    assert.equal(mock.mainSocketCount(), before - 1, 'HA-side socket still open 5s after the browser left');
+  });
+});
+
 describe('live allowlist rebuild on lovelace_updated', () => {
   let mock, proxy, port;
   before(async () => {

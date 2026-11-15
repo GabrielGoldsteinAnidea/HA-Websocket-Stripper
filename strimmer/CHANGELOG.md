@@ -1,7 +1,9 @@
 # Changelog
 
-## Unreleased
+## 2026.11.15.1 — 2026-11-15
 
+- **A Home Assistant socket paused by backpressure is now destroyed when its browser goes away** (#3).
+  Closing it sent a close frame the paused socket never read, so the HA leg lingered for 30s or more.
 - **Console rework.** Five tabs (Overview, Dashboards, Clients, Settings, Diagnostics) in Home Assistant's
   settings style: cards, list rows, switches, text buttons, a pause card with duration and scope, and
   advanced options collapsed. Every function of the old console is still there. Changed on purpose:
@@ -14,10 +16,12 @@
 - **`always_forward_device_class`** (add-on options and the console's Config tab): forward every entity of a
   device class (`battery`, or `sensor:battery`), for cards that scan all states at runtime and so name
   nothing the allowlist can find. Matched against live state at each rebuild.
-
 - **Download diagnostics** (Diagnostics tab, administrators only): one JSON file with the version, redacted
   options, the allowlist per dashboard, the dashboard configs (credentials removed by key name), the
   entity ids panels asked for that were not forwarded, and the stats. Attach it to a bug report.
+- Build tooling: GitHub Actions and Python tool updates (Dependabot).
+
+Nothing to do on upgrade.
 
 ## 2026.11.02.1 — 2026-11-02
 

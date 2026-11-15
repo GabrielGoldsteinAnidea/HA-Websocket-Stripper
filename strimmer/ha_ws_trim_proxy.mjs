@@ -90,7 +90,7 @@ const inAddon = !!process.env.SUPERVISOR_TOKEN;
 // Bump together with config.yaml `version`. Logged at boot so the add-on log shows exactly
 // which code is running — the only reliable way to tell a Rebuild actually picked up changes
 // (a local add-on bakes in whatever files are in the host's /addons folder, not GitHub).
-const VERSION = '2026.11.02.1';
+const VERSION = '2026.11.15.1';
 
 const toList = (v) => (Array.isArray(v) ? v : String(v ?? '').split(/[\n,]/))
   .map((s) => String(s).trim()).filter(Boolean);
@@ -4560,7 +4560,9 @@ function bridge(browserWs, baseAllow = ALLOW, dash = null, meta = {}) {
     clearInterval(liveTimer);
     openBridges.delete(close); stats.connClose(connId);
     if (bpTimer) { clearInterval(bpTimer); bpTimer = null; }
-    try { browserWs.close(); } catch {} try { haWs.close(); } catch {}
+    try { browserWs.close(); } catch {}
+    // A paused HA socket never reads the close handshake, so close() would hold it for 30s (#3).
+    try { if (bpPaused) haWs.terminate(); else haWs.close(); } catch {}
   };
   openBridges.set(close, bridgeInfo);   // so a grown allowlist — or a pause — can recycle this connection (#7)
   browserWs.on('close', (code) => {

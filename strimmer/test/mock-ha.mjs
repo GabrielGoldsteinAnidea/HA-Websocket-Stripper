@@ -357,6 +357,7 @@ export async function startMockHa({ users = DEFAULT_USERS, configs = DEFAULT_CON
     sendRaw: (str) => { try { lastMain()?.send(str); } catch {} },
     sendBinaryToLastClient: (buf) => { try { lastMain()?.send(buf, { binary: true }); } catch {} },
     rpcCount: (type) => state.rpcCounts.get(type) || 0,
+    mainSocketCount: () => state.mainSockets.length,
     port,
     base: `http://127.0.0.1:${port}`,
     wsUrl: `ws://127.0.0.1:${port}/api/websocket`,
