@@ -1,5 +1,5 @@
 name: Strimmer
-version: "2026.11.15.1"
+version: "2026.11.15.2"
 slug: strimmer
 stage: stable
 description: Serves your real HA dashboards but trims the entity websocket to only what each dashboard uses — fast kiosk loads, full fidelity.
@@ -41,6 +41,10 @@ hassio_api: true
 # No `ports:` mapping: with host_network the app binds the host port directly, so a
 # Docker port map is inert. The single source of truth for the listen port is the `port`
 # option below (default 9123). Reach the app at http://<host>:<port>.
+# Read-only, for ha_ca_file: a private CA's certificate lives in Home Assistant's ssl folder.
+map:
+  - type: ssl
+    read_only: true
 options:
   # Empty on purpose. This used to default to the author's own dashboards, which on anyone
   # else's instance resolve to nothing — and an empty allowlist is not a harmless no-op: HA
@@ -132,6 +136,7 @@ options:
   client_api_access: lan
   client_api_allow: []
   ha_base: ""
+  ha_ca_file: ""
   allow_ws_url: ""
 schema:
   dashboards:
@@ -227,4 +232,5 @@ schema:
   client_api_allow:
     - str?
   ha_base: "str?"
+  ha_ca_file: "str?"
   allow_ws_url: "str?"

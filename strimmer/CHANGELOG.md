@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026.11.15.2 — 2026-11-15
+
+- **`ha_ca_file`** (#11): for an `https://` `ha_base` signed by your own CA, point this at the CA's PEM in
+  `/ssl` and the app verifies Home Assistant against it. Before, the connection failed with "unable to
+  verify the first certificate", and the log blamed HA not being up yet. That log line now names the
+  option. The app's `ssl` folder is mapped read-only for it.
+
+Nothing to do on upgrade.
+
 ## 2026.11.15.1 — 2026-11-15
 
 - **A Home Assistant socket paused by backpressure is now destroyed when its browser goes away** (#3).

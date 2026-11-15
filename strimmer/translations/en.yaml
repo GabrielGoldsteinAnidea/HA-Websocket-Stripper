@@ -344,6 +344,11 @@ configuration:
       Override the Home Assistant address the app proxies to. Only needed when the
       internal hostname does not resolve under host networking — then set something like
       http://192.168.1.10:8123.
+  ha_ca_file:
+    name: Home Assistant CA certificate (advanced)
+    description: >-
+      For an https:// Home Assistant URL signed by your own CA. Path to the CA's PEM file
+      in the ssl folder, for example /ssl/my-root-ca.pem.
   allow_ws_url:
     name: Allowlist websocket URL (advanced)
     description: >-

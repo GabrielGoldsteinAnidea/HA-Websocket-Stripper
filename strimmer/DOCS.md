@@ -40,6 +40,7 @@ still read. See [docs/MIGRATING.md](../docs/MIGRATING.md) for what was renamed a
 | `proxy_port` | int | Port browsers and wall panels connect to (default `9123`). The older name `port` is still accepted. Because it runs with `host_network: true`, this option is how you move it off `9123` — the **Network** tab can't remap a host-network port. Change it if `9123` collides with another app (e.g. Zigbee2MQTT). |
 | `mgmt_port` | int | Where the console and its JSON API listen (default `9122`). The older name `stats_port` is still accepted. **Only the default is reachable from the sidebar** — Home Assistant routes the Ingress panel to `ingress_port`, fixed at install time. Move this and the console is still served directly at `http://<host>:<port>/`, and the app says so in its log when the two differ. |
 | `ha_base` | string | Optional. Override the Home Assistant base URL the app proxies to (default `http://homeassistant:8123`). Set this if `host_network` is on and the internal `homeassistant` hostname doesn't resolve — e.g. `http://192.168.4.2:8123`. |
+| `ha_ca_file` | string | Optional. For an `https://` `ha_base` whose certificate comes from your own CA: the path to that CA's certificate (PEM) in Home Assistant's `ssl` folder, e.g. `/ssl/my-root-ca.pem`. The app then verifies Home Assistant against it instead of failing with "unable to verify the first certificate". The CA is trusted for the app's other outgoing HTTPS too. |
 | `allow_ws_url` | string | Optional. Override the websocket URL used once at startup to precompute the allowlist (default `ws://supervisor/core/websocket`). Set if `supervisor` doesn't resolve under `host_network` — e.g. `ws://192.168.4.2:8123/api/websocket` (also requires a token via `ALLOW_TOKEN`). |
 
 ### Example
@@ -270,7 +271,7 @@ already in effect — and **Use add-on setting** hands it back.
 Options are read once at startup, so a change takes effect on the next restart.
 
 **Setup options are deliberately not editable here**: `proxy_port`, `mgmt_port`, `ha_base`,
-`allow_ws_url` and `log_level` stay in the add-on's Configuration tab. How the process binds and
+`ha_ca_file`, `allow_ws_url` and `log_level` stay in the add-on's Configuration tab. How the process binds and
 finds Home Assistant has to stay fixable from Home Assistant when the console is the thing that is
 broken.
 

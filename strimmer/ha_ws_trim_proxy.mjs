@@ -26,6 +26,7 @@
 //   ALLOW_WS_URL / ALLOW_TOKEN (override the allowlist-precompute connection).
 
 import http from 'node:http';
+import tls from 'node:tls';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
@@ -90,13 +91,24 @@ const inAddon = !!process.env.SUPERVISOR_TOKEN;
 // Bump together with config.yaml `version`. Logged at boot so the add-on log shows exactly
 // which code is running — the only reliable way to tell a Rebuild actually picked up changes
 // (a local add-on bakes in whatever files are in the host's /addons folder, not GitHub).
-const VERSION = '2026.11.15.1';
+const VERSION = '2026.11.15.2';
 
 const toList = (v) => (Array.isArray(v) ? v : String(v ?? '').split(/[\n,]/))
   .map((s) => String(s).trim()).filter(Boolean);
 
 const HA_BASE = process.env.HA_BASE || OPT.ha_base || (inAddon ? 'http://homeassistant:8123' : 'http://homeassistant.mgmt:8123');
 const HA_WS = HA_BASE.replace(/^http/, 'ws') + '/api/websocket';     // browser ws relay target
+// A private CA for an https:// ha_base (#11). Added to the process-wide trust store, so httpxy, ws
+// and fetch all verify Home Assistant against it without each connection being told.
+const HA_CA_FILE = process.env.HA_CA_FILE || OPT.ha_ca_file || '';
+if (HA_CA_FILE) {
+  try {
+    const certs = fs.readFileSync(HA_CA_FILE, 'utf8').match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g);
+    if (!certs) throw new Error('no PEM certificate in it');
+    tls.setDefaultCACertificates([...tls.getCACertificates('default'), ...certs]);
+    CONFIG_WARNINGS.push(`trusting ${certs.length} CA certificate(s) from ${HA_CA_FILE}`);
+  } catch (e) { CONFIG_WARNINGS.push(`ha_ca_file ${HA_CA_FILE} not used: ${e.message}`); }
+}
 // Port precedence: PORT env (dev) > `port` add-on option > 9123. Under host_network the
 // add-on binds this directly on the host, so the option is the only way to move it off
 // 9123 (the Network tab can't remap a host-network port) — see issue #6.
@@ -1584,7 +1596,7 @@ function startController() {
         // failed". Nothing is lost by cancelling it: the reconnect rebuilds from scratch, and that
         // build reads the same ALWAYS / RES_ALWAYS lists a pending pin had already appended to.
         clearTimeout(recomputeTimer);
-        if (e) logThrottled(`ctrl:${e.code || e.message}`, `control ws error: ${e.message}`);
+        if (e) logThrottled(`ctrl:${e.code || e.message}`, `control ws error: ${e.message}${/CERT|ISSUER|SELF_SIGNED|UNABLE_TO_VERIFY/.test(e.code || '') && !HA_CA_FILE ? ' — if Home Assistant uses your own CA, set ha_ca_file' : ''}`);
         Object.values(pending).forEach(([, rej]) => rej(new Error('control ws closed')));
         [...tplWaiters.keys()].forEach((k) => settleTpl(k, new Error('control ws closed')));
         const state = settled ? `serving last allowlist: ${ALLOW.size}` : 'waiting for HA to come up';

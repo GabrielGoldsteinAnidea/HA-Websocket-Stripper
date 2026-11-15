@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
+import tls from 'node:tls';
+import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { WebSocket } from 'ws';
 import { startMockHa, getFreePort, haClient } from './mock-ha.mjs';
@@ -1144,5 +1146,46 @@ describe('the rebuild report', () => {
     const out = proxy.out.slice(marker);
     assert.match(out, /auto-dash: \d+ entities/, 'a changed rebuild must show its working');
     assert.doesNotMatch(out, /rebuild detail unchanged/);
+  });
+});
+
+// #11: Home Assistant on https:// with a certificate from a private CA. A TLS front with a server
+// certificate signed by a test root CA stands in for that HA; the proxy must reach it through
+// ha_ca_file and refuse it without.
+describe('ha_ca_file: Home Assistant behind a private CA', () => {
+  const CA = path.join(DIR, 'fixtures', 'private-ca');
+  let mock, front, frontPort;
+  before(async () => {
+    mock = await startMockHa();
+    front = tls.createServer({ key: fs.readFileSync(path.join(CA, 'server.key')), cert: fs.readFileSync(path.join(CA, 'server.pem')) },
+      (s) => { const up = net.connect(mock.port, '127.0.0.1'); s.pipe(up).pipe(s); s.on('error', () => up.destroy()); up.on('error', () => s.destroy()); });
+    frontPort = await getFreePort();
+    await new Promise((res) => front.listen(frontPort, '127.0.0.1', res));
+  });
+  after(async () => { front.close(); await mock.close(); });
+
+  const start = async (extraEnv) => {
+    const port = await getFreePort();
+    const proxy = spawnProxy({ mock: { base: `https://127.0.0.1:${frontPort}` }, dashPaths: 'test-dash', port, extraEnv });
+    return { proxy, port };
+  };
+
+  it('verifies HA against the CA file and proxies through it', async () => {
+    const { proxy, port } = await start({ HA_CA_FILE: path.join(CA, 'ca.pem') });
+    try {
+      await proxy.waitForLog(READY);
+      assert.match(proxy.out, /trusting 1 CA certificate\(s\)/);
+      const c = haClient(`ws://127.0.0.1:${port}/api/websocket`);
+      await c.authed;                                  // the bridge reached HA over TLS
+      c.close();
+    } finally { proxy.kill(); }
+  });
+
+  it('still refuses that certificate without it', async () => {
+    const { proxy } = await start({});
+    try {
+      await proxy.waitForLog(/control ws error: unable to verify[^\n]*set ha_ca_file/, 15000);
+      assert.doesNotMatch(proxy.out, READY);
+    } finally { proxy.kill(); }
   });
 });

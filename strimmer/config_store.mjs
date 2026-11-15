@@ -35,7 +35,7 @@ export const STORE_VERSION = 1;
 // leave the canonical names adoptable while only the legacy aliases were protected — and adopting
 // the port the console is served on is the one change that can make the console unreachable.
 export const BOOTSTRAP_KEYS = new Set([
-  'log_level', 'proxy_port', 'port', 'mgmt_port', 'stats_port', 'ha_base', 'allow_ws_url',
+  'log_level', 'proxy_port', 'port', 'mgmt_port', 'stats_port', 'ha_base', 'ha_ca_file', 'allow_ws_url',
   // How the ESPHome listener binds and how Home Assistant authenticates to it. Same class as the
   // ports above: a listener's address and key belong where they can be fixed from Home Assistant
   // when this console is what is broken.
