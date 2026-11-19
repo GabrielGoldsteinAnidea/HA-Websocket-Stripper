@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026.11.18.2 — 2026-11-18
+
+- **A resource that literally defines a card is kept even when a file name points elsewhere.** An inline
+  `data:` card has no path, so for `light-dial-card` the fragment `light` made an unrelated
+  `ambient-light-card.js` the "provider" and the real one was dropped. A body that calls
+  `customElements.define("<type>")` for a card the dashboard uses now counts first; a bundle that only
+  mentions the name still does not.
+
+Nothing to do on upgrade.
+
 ## 2026.11.18.1 — 2026-11-18
 
 - **An inline `data:` resource that is edited is no longer dropped from the dashboard** (#34). Home Assistant's

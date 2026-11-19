@@ -91,7 +91,7 @@ const inAddon = !!process.env.SUPERVISOR_TOKEN;
 // Bump together with config.yaml `version`. Logged at boot so the add-on log shows exactly
 // which code is running — the only reliable way to tell a Rebuild actually picked up changes
 // (a local add-on bakes in whatever files are in the host's /addons folder, not GitHub).
-const VERSION = '2026.11.18.1';
+const VERSION = '2026.11.18.2';
 
 const toList = (v) => (Array.isArray(v) ? v : String(v ?? '').split(/[\n,]/))
   .map((s) => String(s).trim()).filter(Boolean);
@@ -2280,6 +2280,11 @@ function keepResourceFor(url, keep, rr) {
 // A `data:` resource carries its whole script in the URL (tens of KB): never log it whole.
 const shortUrl = (u) => { u = String(u ?? ''); return u.length > 100 ? `${u.slice(0, 60)}…(${u.length} chars)` : u; };
 
+// The body REGISTERS this element, which a name-drop in a bundle that merely integrates with it
+// never does.
+const definesElement = (body, name) => new RegExp(
+  `customElements\\s*\\.\\s*define\\s*\\(\\s*["'\`]${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["'\`]`).test(body);
+
 function keepResource(url, keys, providers = null) {
   if (matchesUrl(RES_NEVER, url)) return false;
   if (matchesUrl(RES_ALWAYS, url)) return true;
@@ -2300,6 +2305,10 @@ function keepResource(url, keys, providers = null) {
     for (const f of c.fonts) if (keys.fontText.includes(f)) return true;
   }
   for (const k of keys.cards) {
+    // A literal define of this exact type beats a provider guessed from file names: an inline
+    // `data:` resource has no path to be judged by, and a fragment like `light` can point at
+    // unrelated files while the real provider sits elsewhere.
+    if (c.defines?.has(k)) return true;
     const prov = providers?.get(k);
     // A provider is known for this card type, so only the provider counts for it.
     if (prov) { if (prov.has(resourcePath(url))) return true; continue; }
@@ -2417,6 +2426,7 @@ async function buildResources(rpc, keysByDash) {
         literal: new Set([...literalNames].filter((k) => body.includes(k))),
         icons: new Set([...unionIcons].filter((k) => bodyHasIcon(body, k))),
         frags: new Set([...unionFrags].filter((f) => body.includes(f))),
+        defines: new Set([...literalNames].filter((k) => definesElement(body, k))),
         fonts: fontsDeclaredIn(body),
         unreadable: false,
         bytes: body.length,

@@ -72,3 +72,37 @@ describe('inline data: resources', () => {
     assert.ok((await urls()).includes(CARD(3)));
   });
 });
+
+// A fragment-guessed path provider must not outrank a resource that literally defines the type.
+// On the live instance `light-dial-card` -> fragment `light` -> /local/ambient-light-card.js, and
+// the inline resource that really defines it was dropped.
+describe('inline define vs path-guessed provider', () => {
+  const DIAL = dataUrl('customElements.define("light-dial-card", class {});');
+  const CFG2 = { views: [{ cards: [{ type: 'custom:light-dial-card', entity: 'light.living_room' }] }] };
+  it('keeps the inline resource that defines the card', async () => {
+    const m = await startMockHa({
+      configs: { 'dial-dash': CFG2 },
+      resources: [{ id: 'a', type: 'module', url: DIAL }, { id: 'b', type: 'module', url: '/local/ambient-light-card.js' },
+        { id: 'c', type: 'module', url: '/local/unrelated.js' }],
+      resourceBodies: { '/local/ambient-light-card.js': 'x', '/local/unrelated.js': 'y' },
+    });
+    const port = await getFreePort();
+    const proc = spawn(process.execPath, [path.join(DIR, '..', 'ha_ws_trim_proxy.mjs')], {
+      cwd: path.join(DIR, '..'),
+      env: { ...process.env, HA_BASE: m.base, HA_TOKEN: 'test-token', DASH_PATHS: 'dial-dash',
+        PORT: String(port), STATS_PORT: '0', STRIP_ENTITIES: '1', TRIM_RESOURCES: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = ''; proc.stdout.on('data', (b) => { out += b; }); proc.stderr.on('data', (b) => { out += b; });
+    try {
+      for (let i = 0; !/for live allowlist updates/.test(out); i++) { assert.ok(i < 400, out); await new Promise((r) => setTimeout(r, 50)); }
+      await get(`http://127.0.0.1:${port}/dial-dash`);
+      const c = haClient(`ws://127.0.0.1:${port}/api/websocket`);
+      await c.authed;
+      const urls = (await c.rpc({ type: 'lovelace/resources' })).result.map((r) => r.url);
+      c.close();
+      assert.ok(urls.includes(DIAL), 'the resource that literally defines light-dial-card must be kept\n' + out);
+      assert.ok(!urls.includes('/local/unrelated.js'), 'trimming still happens');
+    } finally { proc.kill(); await m.close(); }
+  });
+});
