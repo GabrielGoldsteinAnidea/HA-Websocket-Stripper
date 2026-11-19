@@ -312,6 +312,10 @@ export async function startMockHa({ users = DEFAULT_USERS, configs = DEFAULT_CON
         }
         case 'lovelace/dashboards/list':
           return ok(Object.keys(configs).map((url_path) => ({ id: url_path, url_path, title: url_path })));
+        // Like real HA: `result: null`, then events carrying the COMMAND's id.
+        case 'lovelace/resources/subscribe':
+          conn.resSubId = m.id;
+          return ok(null);
         case 'subscribe_events':
           conn.eventSubs.set(m.event_type, m.id);
           return ok(null);
@@ -388,6 +392,15 @@ export async function startMockHa({ users = DEFAULT_USERS, configs = DEFAULT_CON
     bumpResourceQuery(pathFragment, qs) {
       for (const r of resources) {
         if (r.url.includes(pathFragment)) r.url = r.url.split('?')[0] + qs;
+      }
+    },
+    // Change a resource's URL and, unless `notify` is false, send the collection's `updated` event.
+    updateResourceUrl(id, url, notify = true) {
+      const r = resources.find((x) => x.id === id);
+      r.url = url;
+      if (!notify) return;
+      for (const c of state.conns) {
+        if (c.resSubId != null) c.ws.send(JSON.stringify({ id: c.resSubId, type: 'event', event: [{ change_type: 'updated', item_id: id, item: r }] }));
       }
     },
     setCurrentUserDelay(ms) { state.currentUserDelayMs = ms; },

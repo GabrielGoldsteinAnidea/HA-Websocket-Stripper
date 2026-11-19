@@ -2,7 +2,7 @@
   "name": "strimmer",
   "private": true,
   "type": "module",
-  "version": "2026.11.15.2",
+  "version": "2026.11.18.1",
   "description": "Reverse proxy that serves the real HA frontend but trims the entity websocket to a dashboard allowlist.",
   "main": "ha_ws_trim_proxy.mjs",
   "scripts": {

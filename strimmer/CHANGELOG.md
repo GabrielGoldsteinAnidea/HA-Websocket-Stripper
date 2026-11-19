@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026.11.18.1 — 2026-11-18
+
+- **An inline `data:` resource that is edited is no longer dropped from the dashboard** (#34). Home Assistant's
+  resources subscription answers with an empty result and tags its events with the command's id, and the
+  app was reading the id from the result, so it never noticed a resource change. A resource URL the last
+  rebuild had not seen is also now forwarded rather than dropped.
+- `data:` resources are read, so their card names are matched like any other bundle, and a resource URL
+  is shortened wherever it is logged (a 46 KB inline card used to be written to the log whole).
+
+Nothing to do on upgrade.
+
 ## 2026.11.15.2 — 2026-11-15
 
 - **`ha_ca_file`** (#11): for an `https://` `ha_base` signed by your own CA, point this at the CA's PEM in

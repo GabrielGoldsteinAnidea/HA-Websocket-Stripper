@@ -91,7 +91,7 @@ const inAddon = !!process.env.SUPERVISOR_TOKEN;
 // Bump together with config.yaml `version`. Logged at boot so the add-on log shows exactly
 // which code is running — the only reliable way to tell a Rebuild actually picked up changes
 // (a local add-on bakes in whatever files are in the host's /addons folder, not GitHub).
-const VERSION = '2026.11.15.2';
+const VERSION = '2026.11.18.1';
 
 const toList = (v) => (Array.isArray(v) ? v : String(v ?? '').split(/[\n,]/))
   .map((s) => String(s).trim()).filter(Boolean);
@@ -1528,7 +1528,13 @@ function startController() {
             // being ADDED or REMOVED, not merely re-versioned.
             if (TRIM_RESOURCES) {
               try {
-                resourceSubId = await rpc({ type: 'lovelace/resources/subscribe' });
+                // HA answers a subscribe with `result: null`; the events that follow carry the
+                // COMMAND's id. rpc() resolves with the result, so awaiting its value left this
+                // null and every resource event went unmatched. rpc() assigns `o.id` synchronously.
+                const sub = { type: 'lovelace/resources/subscribe' };
+                const done = rpc(sub);
+                resourceSubId = sub.id;
+                await done;
                 log('watching lovelace/resources for added or removed custom cards');
               } catch (e) {
                 resourceSubId = null;
@@ -2266,8 +2272,13 @@ function keepResourceFor(url, keep, rr) {
   const u = String(url ?? '');
   if (rr && matchesUrl(rr.never, u)) return false;
   if (rr && matchesUrl(rr.always, u)) return true;
-  return !keep?.size || keep.has(resourcePath(u));
+  // A URL the last build never saw (a resource added or re-versioned since) is unknown, not
+  // unused: forward it. Only a path buildResources() has registered and not kept is dropped.
+  return !keep?.size || keep.has(resourcePath(u)) || !RESOURCE_ALL_PATHS.has(resourcePath(u));
 }
+
+// A `data:` resource carries its whole script in the URL (tens of KB): never log it whole.
+const shortUrl = (u) => { u = String(u ?? ''); return u.length > 100 ? `${u.slice(0, 60)}…(${u.length} chars)` : u; };
 
 function keepResource(url, keys, providers = null) {
   if (matchesUrl(RES_NEVER, url)) return false;
@@ -2397,7 +2408,7 @@ async function buildResources(rpc, keysByDash) {
     // must not stay unscanned (and its cards dropped) until its URL changes.
     if (c && (!c.unreadable || Date.now() - c.at < 300000) && [...unionKeys].every((k) => c.tested.has(k))) continue;
     try {
-      const abs = /^https?:/i.test(r.url) ? r.url : HA_BASE + r.url;
+      const abs = /^(https?|data):/i.test(r.url) ? r.url : HA_BASE + r.url;
       const res = await fetch(abs, { signal: AbortSignal.timeout(20000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = await res.text();
@@ -2412,7 +2423,7 @@ async function buildResources(rpc, keysByDash) {
       });
     } catch (e) {
       RESOURCE_CACHE.set(r.url, { tested: new Set(unionKeys), literal: new Set(), icons: new Set(), frags: new Set(), fonts: new Set(), unreadable: true, bytes: 0, at: Date.now() });
-      logThrottled(`res:${r.url}`, `  resources: could not read ${r.url} (${e.message}) — always forwarding it`);
+      logThrottled(`res:${shortUrl(r.url)}`, `  resources: could not read ${shortUrl(r.url)} (${e.message}) — always forwarding it`);
     }
   }
 
@@ -2619,7 +2630,7 @@ async function buildResources(rpc, keysByDash) {
     say('    those is INVISIBLE: the dashboard renders normally and only the behaviour stops.');
     for (const r of droppedByAll) {
       const b = ((RESOURCE_CACHE.get(r.url)?.bytes || 0) / 1024).toFixed(0);
-      say(`      drop ${String(b).padStart(6)}KB ${r.url.split('?')[0]}`);
+      say(`      drop ${String(b).padStart(6)}KB ${shortUrl(r.url.split('?')[0])}`);
     }
   }
 
