@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026.11.19.1 — 2026-11-19
+
+- **A page can ask for the entities it needs.** `strimmer/want` on the websocket, with entity ids or `*`
+  globs, adds them for that user's connections for a day; Strimmer answers it and reconnects the page once
+  when it adds anything. For pages like Sextant's that read `hass.states` directly, so nobody has to list
+  their entities in an override. See *A page asking for its entities* in the docs.
+
+Nothing to do on upgrade.
+
 ## 2026.11.18.2 — 2026-11-18
 
 - **A resource that literally defines a card is kept even when a file name points elsewhere.** An inline

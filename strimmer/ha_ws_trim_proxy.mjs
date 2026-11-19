@@ -91,7 +91,7 @@ const inAddon = !!process.env.SUPERVISOR_TOKEN;
 // Bump together with config.yaml `version`. Logged at boot so the add-on log shows exactly
 // which code is running — the only reliable way to tell a Rebuild actually picked up changes
 // (a local add-on bakes in whatever files are in the host's /addons folder, not GitHub).
-const VERSION = '2026.11.18.2';
+const VERSION = '2026.11.19.1';
 
 const toList = (v) => (Array.isArray(v) ? v : String(v ?? '').split(/[\n,]/))
   .map((s) => String(s).trim()).filter(Boolean);
@@ -3153,6 +3153,43 @@ function learnClientEntity(ip, entityId) {
   return added.length ? added : null;
 }
 
+// user id -> { rules, at }: entities a page asked for with `strimmer/want`, for that user's
+// connections. A page that reads hass.states at runtime (no card config names its entities) can
+// say what it needs instead of every user listing it in user_overrides. Strictly additive, never
+// past never_forward, and kept a day from the last ask; the page asks again on each connection.
+const WANTS = new Map();
+const WANTS_MAX = 200;
+const WANTS_TTL_MS = 86400000;
+// Globs, not regexes: these come from any logged-in user's browser, and a regex from the wire is a
+// ReDoS waiting to happen. `*` is the only wildcard, at most three of them, and at least one real
+// character besides, so `*` alone cannot ask for everything.
+const WANT_RE = /^[a-z0-9_.*]{1,200}$/;
+function parseWants(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const p of list.slice(0, 50)) {
+    if (typeof p !== 'string' || !WANT_RE.test(p)) continue;
+    const stars = (p.match(/\*/g) || []).length;
+    if (stars > 3 || !/[a-z0-9_]/.test(p)) continue;
+    if (!stars) { if (ENTITY_ID_RE.test(p)) out.push({ literal: p }); continue; }
+    out.push({ re: new RegExp(`^${p.replace(/\./g, '\\.').replace(/\*/g, '.*')}$`) });
+  }
+  return out;
+}
+function wantsFor(user) {
+  const key = user?.id;
+  const hit = key ? WANTS.get(key) : null;
+  if (hit && Date.now() - hit.at > WANTS_TTL_MS) { WANTS.delete(key); return null; }
+  return hit ? hit.rules : null;
+}
+function addWants(user, rules) {
+  if (WANTS.size >= WANTS_MAX && !WANTS.has(user.id)) boundByAge(WANTS, WANTS_TTL_MS, WANTS_MAX - 1);
+  const have = WANTS.get(user.id)?.rules ?? [];
+  const key = (r) => r.literal ?? String(r.re);
+  const merged = [...have, ...rules.filter((r) => !have.some((h) => key(h) === key(r)))].slice(-50);
+  WANTS.set(user.id, { rules: merged, at: Date.now() });
+}
+
 const clientDash = new Map();                 // ip -> { path, at }
 
 // Kept across restarts, in /data, for the same reason the user cache is.
@@ -3767,6 +3804,9 @@ function bridge(browserWs, baseAllow = ALLOW, dash = null, meta = {}) {
     origin: meta.origin, route: meta.route, host: meta.host, hop: meta.hop, hops: meta.hops,
   });
   let userChecked = false;
+  // The user lookup started by the auth message, for strimmer/want; and the user rules' never list.
+  let userP = null;
+  let userNever = [];
   let learnedKick = false;   // only ever drop a connection once for a newly-learned identity
   // Resource rules for THIS connection: the client-matched ones from the upgrade, joined by the
   // user-matched ones once identity resolves. Consulted when its lovelace/resources reply is
@@ -3924,11 +3964,32 @@ function bridge(browserWs, baseAllow = ALLOW, dash = null, meta = {}) {
     try { m = JSON.parse(s); } catch { return toHA(s); }
     // The auth message carries the identity. Forward it immediately (HA is waiting for it),
     // then hold everything after it until the user is known.
-    if ((userRulesCouldApply(dash) || anyPauseActive(PAUSES)) && m && m.type === 'auth' && m.access_token && gateQueue === null && !userChecked) {
+    // A page asking for entities. Answered here and never forwarded: Home Assistant does not know
+    // the command, and the answer depends on who is asking, which only the token says.
+    if (m && m.type === 'strimmer/want' && m.id != null) {
+      const reply = (o) => { try { browserWs.send(JSON.stringify({ id: m.id, type: 'result', ...o })); } catch {} };
+      if (!userP) { reply({ success: false, error: { code: 'unauthorized', message: 'authenticate first' } }); return; }
+      const rules = parseWants(m.entity_ids);
+      userP.then((user) => {
+        if (!user?.id) return reply({ success: false, error: { code: 'unauthorized', message: 'unknown user' } });
+        if (!rules.length) return reply({ success: true, result: { strimmer: true, added: 0 } });
+        addWants(user, rules);
+        const wider = applyUserRules(allow, { always: rules, never: [...NEVER, ...userNever] });
+        const added = trimming ? [...wider].filter((id) => !allow.has(id)).length : 0;
+        reply({ success: true, result: { strimmer: true, added } });
+        if (!added) return;
+        log(`${user.name ?? user.id} asked for ${added} more entities${dash ? ` on ${dash}` : ''}: reconnecting it to add them`);
+        // HA cannot amend a live subscribe_entities, so the page reconnects to get them; once per
+        // connection, the same as a satellite naming itself, so it cannot loop.
+        if (!learnedKick) { learnedKick = true; setTimeout(() => { try { browserWs.close(); } catch {} }, 250); }
+      }).catch(() => reply({ success: false, error: { code: 'unknown_error', message: 'user lookup failed' } }));
+      return;
+    }
+    if ((userRulesCouldApply(dash) || anyPauseActive(PAUSES) || WANTS.size > 0) && m && m.type === 'auth' && m.access_token && gateQueue === null && !userChecked) {
       userChecked = true;
       toHA(s);
       gateQueue = [];
-      resolveUser(m.access_token, meta.fwd).then((user) => {
+      (userP = resolveUser(m.access_token, meta.fwd)).then((user) => {
         // Rebuilt from what bridge() was handed rather than captured in the upgrade handler:
         // the two are different functions, and reaching across cost a silent ReferenceError
         // inside this promise chain — the widening simply never happened and nothing said so.
@@ -3958,6 +4019,12 @@ function bridge(browserWs, baseAllow = ALLOW, dash = null, meta = {}) {
             + `${dash ? ` on ${dash}` : ''} (was ${baseAllow.size})`;
           if (onceOnly(`user-rules:${user.id}:${dash ?? ''}:${allow.size}`)) log(msg); else debug(msg);
         }
+        if (extra) userNever = extra.never;
+        const want = wantsFor(user);
+        if (want) {
+          allow = applyUserRules(allow, { always: want, never: [...NEVER, ...userNever] });
+          allowSigReset();
+        }
         // The pause, if this user has one. Checked HERE rather than at the upgrade because the
         // token is the only thing that names the person, and it is not read until now. The gate
         // holds every later message, so the first subscribe_entities is still stamped correctly —
@@ -3985,9 +4052,9 @@ function bridge(browserWs, baseAllow = ALLOW, dash = null, meta = {}) {
     // Resolve it for reporting only: no gate, no queue, nothing waits. The answer arrives when it
     // arrives and updates the row in place, so this cannot add a millisecond to a page load.
     // Cached per token like the gated path, so a panel that reconnects hourly asks HA once.
-    if (!userChecked && m && m.type === 'auth' && m.access_token && !userRulesCouldApply(dash) && !anyPauseActive(PAUSES)) {
+    if (!userChecked && m && m.type === 'auth' && m.access_token && !userRulesCouldApply(dash) && !anyPauseActive(PAUSES) && !WANTS.size) {
       userChecked = true;
-      resolveUser(m.access_token, meta.fwd)
+      (userP = resolveUser(m.access_token, meta.fwd))
         .then((user) => {
           if (!user) return;
           bridgeInfo.user = user.id ?? user.name ?? null;

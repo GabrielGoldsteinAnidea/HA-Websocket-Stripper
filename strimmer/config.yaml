@@ -1,5 +1,5 @@
 name: Strimmer
-version: "2026.11.18.2"
+version: "2026.11.19.1"
 slug: strimmer
 stage: stable
 description: Serves your real HA dashboards but trims the entity websocket to only what each dashboard uses — fast kiosk loads, full fidelity.
