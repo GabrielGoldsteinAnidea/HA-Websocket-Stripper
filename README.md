@@ -2,6 +2,21 @@
   <img src="assets/banner.png" alt="WebSocket Stripper — not the whole house" width="640">
 </p>
 
+> [!IMPORTANT]
+> **Looking for the actively developed version? Use [Strimmer](https://github.com/davidcoulson/HA-Strimmer).**
+>
+> Strimmer started as a fork of this project, and [@davidcoulson](https://github.com/davidcoulson)
+> has taken it much further than I have. Beyond the entity trimming done here, it also trims
+> the entity/device/area registries and custom-card downloads, and it gives each dashboard its
+> own allowlist instead of one combined list. It adds per-person and per-panel rules, a settings
+> and statistics panel in the HA sidebar, and a much larger test suite. Huge thanks to Dave for
+> building on the idea so thoroughly, and for the fixes he contributed back here.
+>
+> He also has more time to put into it than I do. This repository will likely move to
+> **maintenance mode**: fixes for breakage and security issues, no new features. Existing
+> installs keep working. Switching is a reinstall, because Strimmer is a separate app with its
+> own slug; see its [migration guide](https://github.com/davidcoulson/HA-Strimmer/blob/main/docs/MIGRATING.md).
+
 # HA WebSocket Stripper — make slow Home Assistant dashboards load fast
 
 > **Speed up slow-loading Home Assistant dashboards on large instances.** A lightweight
