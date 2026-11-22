@@ -5,6 +5,11 @@
 Six contributor PRs, all measured on real instances (a 9,5xx-entity NSPanel install and a
 49-tablet fleet). Thanks @davidcoulson and @ajguerre1.
 
+> **Only marginally tested by the maintainer.** The contributors measured these changes on
+> their own instances and the automated suite passes (95/95), but this release has not been
+> run end to end on the maintainer's own install. If something regresses, the previous
+> version is 0.2.4 — please open an issue with the add-on log.
+
 **The add-on was removing websocket compression** (#14). Home Assistant's own websocket
 negotiates `permessage-deflate`, but the `ws` library does not enable it server-side by
 default — so putting this proxy in front of HA silently downgraded every kiosk from deflated
