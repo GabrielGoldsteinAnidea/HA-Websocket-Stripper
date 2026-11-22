@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.6-beta1 — 2026-11-22
+
+Maintenance beta: three auto-entities fixes, no new features. Thanks @davidcoulson.
+
+> **Beta, untested on the maintainer's own install.** The automated suite passes (108/108).
+> If something regresses, go back to 0.2.5 and open an issue with the add-on log.
+
+**A stray empty line in an auto-entities filter no longer costs the dashboard its allowlist**
+(#24). The visual editor leaves a bare `-` behind as `null`; the extractor dereferenced it and
+threw, so the whole dashboard was logged as `FAILED` and every card on it went "unavailable" —
+with a single dashboard configured, the log blamed Home Assistant instead. Such entries are now
+skipped and named in the log; a bare entity id in `include` is taken as that entity.
+
+**Comparison filters like `state: "< 20"` now match** (#25). Only the regex and glob forms of
+auto-entities' matcher were ported, and anything else fell through to exact equality — so a
+low-battery card matched nothing, silently. The numeric comparisons, the `$$` JSON form and the
+`X ago` timestamp form are now ported from upstream, quirks included.
+
+**A badly backtracking regex can no longer freeze every panel** (#26). A dashboard `/regex/`
+runs on the event loop that relays every panel's websocket; `/^(a+)+$/` held it for 49 s on one
+31-character id. Suspicious patterns now run under a 50 ms deadline, and one that hits it is
+disabled for the life of the process and reported in the log rather than retried.
+
 ## 0.2.5 — 2026-09-19
 
 Six contributor PRs, all measured on real instances (a 9,5xx-entity NSPanel install and a
